@@ -1,0 +1,662 @@
+export default {
+	async fetch(request, env, ctx) {
+		const targetHost = env.DESTINATION;
+		const uuid = env.UUID || '';
+		const url = new URL(request.url);
+		const currentHost = request.headers.get('Host');
+
+		if (uuid && url.pathname === `/${uuid}/sub`) {
+			if (!targetHost) {
+				return new Response('Destination not configured', { status: 500 });
+			}
+			
+			try {
+				const targetUrl = new URL(request.url);
+				targetUrl.hostname = targetHost;
+
+				const headers = new Headers(request.headers);
+				headers.set('X-Forwarded-Host', currentHost);
+
+				const response = await fetch(targetUrl.toString(), {
+					method: request.method,
+					headers: headers,
+				});
+				
+				return new Response(await response.text(), {
+					headers: response.headers
+				});
+			} catch (err) {
+				return new Response('Subscription fetch failed: ' + err.message, { status: 502 });
+			}
+		}
+
+		if (request.headers.get('Upgrade') === 'websocket') {
+			if (!targetHost) {
+				return new Response('Destination not configured for WebSocket', { status: 500 });
+			}
+			return await handleWebSocketProxy(targetHost, request, currentHost);
+		}
+
+		return new Response(getUfoCardHtml(uuid, targetHost), {
+			headers: {
+				'Content-Type': 'text/html; charset=utf-8'
+			}
+		});
+	}
+};
+
+function getUfoCardHtml(uuid, dest) {
+	const dot1Color = uuid ? '#4CAF50' : '#F44336';
+	const dot2Color = dest ? '#4CAF50' : '#F44336';
+
+	return `
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UFO</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        
+        body {
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            overflow: hidden;
+        }
+
+        .card {
+            width: 320px;
+            height: 450px;
+            background-color: #ffffff;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        .status-dots {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            display: flex;
+            gap: 8px;
+        }
+
+        .dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .ufo-container {
+            width: 150px;
+            height: 150px;
+            margin-bottom: 40px;
+            animation: float 3s ease-in-out infinite;
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-15px); }
+        }
+
+        .text {
+            font-size: 18px;
+            color: #333;
+            font-weight: 600;
+        }
+
+        .btn-warp {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        .btn-warp button {
+            padding: 10px 24px;
+            border-radius: 999px;
+            border: none;
+            background: linear-gradient(135deg, #1a237e, #0d47a1);
+            color: #fff;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(26, 35, 126, 0.4);
+            transition: all 0.2s ease;
+        }
+
+        .btn-warp button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(26, 35, 126, 0.5);
+        }
+
+        /* 塔罗牌遮罩 */
+        .tarot-overlay {
+            position: fixed;
+            inset: 0;
+            background: radial-gradient(ellipse at center, rgba(20, 20, 50, 0.95), rgba(5, 5, 20, 0.98));
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .tarot-overlay.show {
+            display: flex;
+        }
+
+        /* 背景星星 */
+        .stars-bg {
+            position: absolute;
+            inset: 0;
+            overflow: hidden;
+        }
+
+        .star {
+            position: absolute;
+            width: 2px;
+            height: 2px;
+            background: #fff;
+            border-radius: 50%;
+            opacity: 0;
+            animation: starTwinkle 2s ease-in-out infinite;
+        }
+
+        @keyframes starTwinkle {
+            0%, 100% { opacity: 0.2; transform: scale(1); }
+            50% { opacity: 1; transform: scale(1.5); }
+        }
+
+        /* 塔罗牌 */
+        .tarot-card {
+            width: 300px;
+            height: 440px;
+            perspective: 1000px;
+            cursor: pointer;
+        }
+
+        .tarot-inner {
+            width: 100%;
+            height: 100%;
+            position: relative;
+            transform-style: preserve-3d;
+            transition: transform 0.8s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+
+        .tarot-card.flipped .tarot-inner {
+            transform: rotateY(180deg);
+        }
+
+        .tarot-front, .tarot-back {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            backface-visibility: hidden;
+            border-radius: 20px;
+            overflow: hidden;
+        }
+
+        /* 牌背 */
+        .tarot-front {
+            background: linear-gradient(160deg, #1a1a3e, #0d0d2b);
+            border: 2px solid rgba(255, 215, 0, 0.3);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 
+                0 0 30px rgba(255, 215, 0, 0.1),
+                0 20px 60px rgba(0, 0, 0, 0.5);
+        }
+
+        .tarot-front::before {
+            content: '';
+            position: absolute;
+            inset: 10px;
+            border: 1px solid rgba(255, 215, 0, 0.15);
+            border-radius: 14px;
+        }
+
+        .card-back-pattern {
+            width: 140px;
+            height: 140px;
+            position: relative;
+        }
+
+        .pattern-ring {
+            position: absolute;
+            inset: 0;
+            border: 2px solid rgba(255, 215, 0, 0.2);
+            border-radius: 50%;
+            animation: ringPulse 3s ease-in-out infinite;
+        }
+
+        .pattern-ring:nth-child(2) {
+            inset: 15px;
+            animation-delay: 0.3s;
+        }
+
+        .pattern-ring:nth-child(3) {
+            inset: 30px;
+            animation-delay: 0.6s;
+        }
+
+        @keyframes ringPulse {
+            0%, 100% { opacity: 0.3; transform: scale(1); }
+            50% { opacity: 0.8; transform: scale(1.05); }
+        }
+
+        .pattern-center {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 40px;
+            animation: iconFloat 2s ease-in-out infinite;
+        }
+
+        @keyframes iconFloat {
+            0%, 100% { transform: translate(-50%, -50%) scale(1); }
+            50% { transform: translate(-50%, -50%) scale(1.1); }
+        }
+
+        .tap-hint {
+            margin-top: 30px;
+            font-size: 13px;
+            color: rgba(255, 215, 0, 0.5);
+            animation: hintPulse 2s ease-in-out infinite;
+        }
+
+        @keyframes hintPulse {
+            0%, 100% { opacity: 0.4; }
+            50% { opacity: 0.8; }
+        }
+
+        /* 牌面 */
+        .tarot-back {
+            background: linear-gradient(160deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            border: 2px solid rgba(255, 215, 0, 0.3);
+            transform: rotateY(180deg);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 30px 24px;
+            box-shadow: 
+                0 0 50px rgba(255, 215, 0, 0.2),
+                0 0 100px rgba(100, 150, 255, 0.1),
+                0 25px 60px rgba(0, 0, 0, 0.6);
+        }
+
+        .tarot-back::before {
+            content: '';
+            position: absolute;
+            inset: 8px;
+            border: 1px solid rgba(255, 215, 0, 0.2);
+            border-radius: 14px;
+            pointer-events: none;
+        }
+
+        /* 流光边框 */
+        .tarot-back::after {
+            content: '';
+            position: absolute;
+            inset: -2px;
+            border-radius: 22px;
+            background: linear-gradient(90deg, 
+                transparent, 
+                rgba(255, 215, 0, 0.4), 
+                transparent, 
+                rgba(100, 200, 255, 0.4), 
+                transparent);
+            background-size: 300% 100%;
+            animation: borderGlow 3s linear infinite;
+            z-index: -1;
+            opacity: 0;
+        }
+
+        .tarot-card.revealed .tarot-back::after {
+            opacity: 1;
+        }
+
+        @keyframes borderGlow {
+            0% { background-position: 100% 0; }
+            100% { background-position: -100% 0; }
+        }
+
+        .tarot-icon {
+            font-size: 72px;
+            margin-bottom: 12px;
+            filter: drop-shadow(0 0 25px rgba(255, 255, 255, 0.5));
+            opacity: 0;
+            transform: scale(0.5) translateY(20px);
+            transition: all 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+
+        .tarot-card.revealed .tarot-icon {
+            opacity: 1;
+            transform: scale(1) translateY(0);
+        }
+
+        .tarot-number {
+            font-size: 11px;
+            color: rgba(255, 215, 0, 0.6);
+            letter-spacing: 4px;
+            margin-bottom: 8px;
+            opacity: 0;
+            transition: opacity 0.4s ease 0.2s;
+        }
+
+        .tarot-card.revealed .tarot-number {
+            opacity: 1;
+        }
+
+        .tarot-title {
+            font-size: 24px;
+            color: #fff;
+            font-weight: 600;
+            text-align: center;
+            margin-bottom: 20px;
+            text-shadow: 0 0 30px rgba(255, 215, 0, 0.5);
+            opacity: 0;
+            transform: translateY(10px);
+            transition: all 0.5s ease 0.3s;
+        }
+
+        .tarot-card.revealed .tarot-title {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .tarot-divider {
+            width: 80px;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, rgba(255, 215, 0, 0.7), transparent);
+            margin-bottom: 24px;
+            opacity: 0;
+            transition: opacity 0.4s ease 0.4s;
+        }
+
+        .tarot-card.revealed .tarot-divider {
+            opacity: 1;
+        }
+
+        .tarot-prophecy {
+            font-size: 15px;
+            color: rgba(255, 255, 255, 0.9);
+            text-align: center;
+            line-height: 2;
+            padding: 0 8px;
+            flex: 1;
+            display: flex;
+            align-items: center;
+            opacity: 0;
+            transform: translateY(15px);
+            transition: all 0.6s ease 0.5s;
+        }
+
+        .tarot-card.revealed .tarot-prophecy {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .tarot-close {
+            margin-top: 20px;
+            padding: 10px 32px;
+            border: 1px solid rgba(255, 215, 0, 0.4);
+            background: rgba(255, 215, 0, 0.05);
+            color: rgba(255, 215, 0, 0.9);
+            border-radius: 25px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            opacity: 0;
+        }
+
+        .tarot-card.revealed .tarot-close {
+            opacity: 1;
+            transition: all 0.2s ease 0.7s;
+        }
+
+        .tarot-close:hover {
+            background: rgba(255, 215, 0, 0.15);
+            border-color: rgba(255, 215, 0, 0.6);
+            transform: scale(1.02);
+        }
+
+        /* 光晕效果 */
+        .glow-orb {
+            position: absolute;
+            width: 200px;
+            height: 200px;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(255, 215, 0, 0.15), transparent 70%);
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.8s ease;
+        }
+
+        .tarot-card.revealed .glow-orb {
+            opacity: 1;
+            animation: orbFloat 4s ease-in-out infinite;
+        }
+
+        @keyframes orbFloat {
+            0%, 100% { transform: translate(-50%, -50%) scale(1); }
+            50% { transform: translate(-50%, -50%) scale(1.2); }
+        }
+
+        .glow-orb.orb1 { top: 20%; left: 20%; animation-delay: 0s; }
+        .glow-orb.orb2 { top: 80%; left: 80%; animation-delay: 1s; background: radial-gradient(circle, rgba(100, 200, 255, 0.1), transparent 70%); }
+        .glow-orb.orb3 { top: 50%; left: 50%; animation-delay: 2s; background: radial-gradient(circle, rgba(255, 100, 200, 0.08), transparent 70%); }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="status-dots">
+            <div class="dot" style="background-color: ${dot1Color};"></div>
+            <div class="dot" style="background-color: ${dot2Color};"></div>
+        </div>
+
+        <div class="ufo-container">
+            <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+                <defs>
+                    <linearGradient id="dome-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+                        <stop offset="0%" style="stop-color:#81D4FA;stop-opacity:1" />
+                        <stop offset="100%" style="stop-color:#29B6F6;stop-opacity:1" />
+                    </linearGradient>
+                </defs>
+                <path d="M30,90 L70,90 L60,60 L40,60 Z" fill="#E1F5FE" opacity="0.7"/>
+                <ellipse cx="50" cy="60" rx="40" ry="12" fill="#78909C" stroke="#546E7A" stroke-width="1"/>
+                <path d="M25,60 Q25,30 50,30 Q75,30 75,60 Z" fill="url(#dome-grad)" stroke="#0288D1" stroke-width="1"/>
+                <path d="M35,45 Q40,35 50,35" fill="none" stroke="rgba(255,255,255,0.6)" stroke-width="3" stroke-linecap="round"/>
+                <circle cx="35" cy="60" r="3" fill="#FFEB3B"/>
+                <circle cx="50" cy="60" r="3" fill="#FFEB3B"/>
+                <circle cx="65" cy="60" r="3" fill="#FFEB3B"/>
+            </svg>
+        </div>
+
+        <div class="text">这里是UFO，不是其他的哦</div>
+
+        <div class="btn-warp">
+            <button id="btnWarp">星际穿梭</button>
+        </div>
+    </div>
+
+    <!-- 塔罗牌遮罩 -->
+    <div class="tarot-overlay" id="overlay">
+        <div class="stars-bg" id="starsBg"></div>
+        
+        <div class="tarot-card" id="tarotCard">
+            <div class="tarot-inner">
+                <!-- 牌背 -->
+                <div class="tarot-front">
+                    <div class="card-back-pattern">
+                        <div class="pattern-ring"></div>
+                        <div class="pattern-ring"></div>
+                        <div class="pattern-ring"></div>
+                        <div class="pattern-center">🔮</div>
+                    </div>
+                    <div class="tap-hint">点击翻牌</div>
+                </div>
+                
+                <!-- 牌面 -->
+                <div class="tarot-back">
+                    <div class="glow-orb orb1"></div>
+                    <div class="glow-orb orb2"></div>
+                    <div class="glow-orb orb3"></div>
+                    <div class="tarot-icon" id="tarotIcon"></div>
+                    <div class="tarot-number" id="tarotNumber"></div>
+                    <div class="tarot-title" id="tarotTitle"></div>
+                    <div class="tarot-divider"></div>
+                    <div class="tarot-prophecy" id="tarotProphecy"></div>
+                    <button class="tarot-close" id="btnClose">返回</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const tarotDeck = [
+            { icon: '📦', name: '星际货仓员', prophecy: '收纳星河的行囊，也别忘记安放自己的星光。' },
+            { icon: '🎫', name: '星港检票员', prophecy: '为他人开启旅程，也要记得奔赴属于你的远方。' },
+            { icon: '🧹', name: '星际清洁工', prophecy: '扫去尘埃与喧嚣，守住内心干净的光亮。' },
+            { icon: '🍜', name: '太空餐车贩', prophecy: '用温暖填满旅途，别让忙碌冲淡生活的甜。' },
+            { icon: '🔧', name: '星舰维修员', prophecy: '修补万千故障，也别忽略内心的小小裂痕。' },
+            { icon: '✉️', name: '星际信使', prophecy: '传递美好与希望，也勇敢表达心底的声音。' },
+            { icon: '🌾', name: '殖民星农夫', prophecy: '耕耘荒芜成沃土，耐心等待终有丰收之时。' },
+            { icon: '📋', name: '空间站文员', prophecy: '书写规则与秩序，保持清醒不被框架束缚。' },
+            { icon: '🚕', name: '星际出租司机', prophecy: '载路人抵达归途，终会遇见属于你的港湾。' },
+            { icon: '📡', name: '太空信号员', prophecy: '连接宇宙的声音，守住真诚不被杂音扰乱。' },
+            { icon: '🎰', name: '星际典当师', prophecy: '衡量世间的珍贵，守住初心不被价值定义。' },
+            { icon: '🛎️', name: '星舰乘务员', prophecy: '陪伴每一段远行，平凡坚守也自有光芒。' },
+            { icon: '⛏️', name: '深空矿工', prophecy: '开采星辰宝藏，守住底线不被欲望吞噬。' },
+            { icon: '🗺️', name: '星际导游', prophecy: '讲述星河浪漫，用心感受每一处风景。' },
+            { icon: '🏪', name: '银河便利店员', prophecy: '点亮深夜微光，平凡坚守也能温暖银河。' }
+        ];
+
+        const overlay = document.getElementById('overlay');
+        const tarotCard = document.getElementById('tarotCard');
+        const starsBg = document.getElementById('starsBg');
+        const btnWarp = document.getElementById('btnWarp');
+        const btnClose = document.getElementById('btnClose');
+
+        let currentCard = null;
+        let isFlipped = false;
+
+        // 生成背景星星
+        function createStars() {
+            starsBg.innerHTML = '';
+            for (let i = 0; i < 80; i++) {
+                const star = document.createElement('div');
+                star.className = 'star';
+                star.style.left = Math.random() * 100 + '%';
+                star.style.top = Math.random() * 100 + '%';
+                star.style.animationDelay = Math.random() * 2 + 's';
+                star.style.animationDuration = (1.5 + Math.random() * 1.5) + 's';
+                starsBg.appendChild(star);
+            }
+        }
+
+        function drawTarot() {
+            const idx = Math.floor(Math.random() * tarotDeck.length);
+            currentCard = tarotDeck[idx];
+            isFlipped = false;
+
+            document.getElementById('tarotIcon').textContent = currentCard.icon;
+            document.getElementById('tarotNumber').textContent = 'NO. ' + String(idx + 1).padStart(2, '0');
+            document.getElementById('tarotTitle').textContent = currentCard.name;
+            document.getElementById('tarotProphecy').textContent = currentCard.prophecy;
+
+            tarotCard.classList.remove('flipped', 'revealed');
+            overlay.classList.add('show');
+            createStars();
+        }
+
+        function flipCard() {
+            if (isFlipped) return;
+            isFlipped = true;
+            tarotCard.classList.add('flipped');
+            
+            setTimeout(() => {
+                tarotCard.classList.add('revealed');
+            }, 400);
+        }
+
+        function closeTarot() {
+            tarotCard.classList.remove('flipped', 'revealed');
+            setTimeout(() => {
+                overlay.classList.remove('show');
+            }, 300);
+        }
+
+        btnWarp.addEventListener('click', drawTarot);
+        tarotCard.addEventListener('click', (e) => {
+            if (e.target.id === 'btnClose') return;
+            if (!isFlipped) flipCard();
+        });
+        btnClose.addEventListener('click', closeTarot);
+    </script>
+</body>
+</html>
+	`;
+}
+
+async function handleWebSocketProxy(targetHost, request, currentHost) {
+	try {
+		const targetWsUrl = new URL(request.url);
+		targetWsUrl.hostname = targetHost;
+
+		const headers = new Headers();
+		for (const [key, value] of request.headers.entries()) {
+			headers.set(key, value);
+		}
+		headers.set('X-Forwarded-Host', currentHost);
+
+		const upstreamResponse = await fetch(targetWsUrl.toString(), {
+			headers: headers
+		});
+
+		const upstreamWs = upstreamResponse.webSocket;
+		if (!upstreamWs) {
+			return new Response('Upstream WebSocket failed', { status: 502 });
+		}
+		upstreamWs.accept();
+
+		const clientPair = new WebSocketPair();
+		const [clientWs, serverWs] = Object.values(clientPair);
+		serverWs.accept();
+
+		serverWs.addEventListener('message', (event) => {
+			try { upstreamWs.send(event.data); } catch (e) { }
+		});
+
+		upstreamWs.addEventListener('message', (event) => {
+			try { serverWs.send(event.data); } catch (e) { }
+		});
+
+		serverWs.addEventListener('close', (event) => {
+			try { upstreamWs.close(event.code, event.reason); } catch (e) { }
+		});
+
+		upstreamWs.addEventListener('close', (event) => {
+			try { serverWs.close(event.code, event.reason); } catch (e) { }
+		});
+
+		return new Response(null, { status: 101, webSocket: clientWs });
+
+	} catch (err) {
+		console.error('WebSocket proxy error:', err);
+		return new Response('WebSocket proxy failed: ' + err.message, { status: 502 });
+	}
+}
