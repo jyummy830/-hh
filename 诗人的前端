@@ -1,0 +1,406 @@
+export default {
+	async fetch(request, env, ctx) {
+		const targetHost = env.DESTINATION;
+		const uuid = env.UUID || '';
+		const url = new URL(request.url);
+		const currentHost = request.headers.get('Host');
+
+		if (uuid && url.pathname === `/${uuid}/sub`) {
+			if (!targetHost) return new Response('Destination not configured', { status: 500 });
+			try {
+				const targetUrl = new URL(request.url);
+				targetUrl.hostname = targetHost;
+				const headers = new Headers(request.headers);
+				headers.set('X-Forwarded-Host', currentHost);
+				const response = await fetch(targetUrl.toString(), { method: request.method, headers: headers });
+				return new Response(await response.text(), { headers: response.headers });
+			} catch (err) {
+				return new Response('Subscription fetch failed: ' + err.message, { status: 502 });
+			}
+		}
+
+		if (request.headers.get('Upgrade') === 'websocket') {
+			if (!targetHost) return new Response('Destination not configured', { status: 500 });
+			return await handleWebSocketProxy(targetHost, request, currentHost);
+		}
+
+		return new Response(getPoetHtml(uuid, targetHost), {
+			headers: { 'Content-Type': 'text/html; charset=utf-8' }
+		});
+	}
+};
+
+async function handleWebSocketProxy(targetHost, request, currentHost) {
+	try {
+		const targetWsUrl = new URL(request.url);
+		targetWsUrl.hostname = targetHost;
+		const headers = new Headers();
+		for (const [key, value] of request.headers.entries()) headers.set(key, value);
+		headers.set('X-Forwarded-Host', currentHost);
+		const upstreamResponse = await fetch(targetWsUrl.toString(), { headers: headers });
+		const upstreamWs = upstreamResponse.webSocket;
+		if (!upstreamWs) return new Response('Upstream WebSocket failed', { status: 502 });
+		upstreamWs.accept();
+		const clientPair = new WebSocketPair();
+		const clientWs = clientPair[0];
+		const serverWs = clientPair[1];
+		serverWs.accept();
+		serverWs.addEventListener('message', (event) => { try { upstreamWs.send(event.data); } catch (e) {} });
+		upstreamWs.addEventListener('message', (event) => { try { serverWs.send(event.data); } catch (e) {} });
+		serverWs.addEventListener('close', (event) => { try { upstreamWs.close(event.code, event.reason); } catch (e) {} });
+		upstreamWs.addEventListener('close', (event) => { try { serverWs.close(event.code, event.reason); } catch (e) {} });
+		return new Response(null, { status: 101, webSocket: clientWs });
+	} catch (err) {
+		return new Response('WebSocket proxy failed: ' + err.message, { status: 502 });
+	}
+}
+
+function getPoetHtml(uuid, dest) {
+	const statusUI = `
+		<div style="display: flex; justify-content: center; gap: 20px; margin-top: 15px; font-family: 'Noto Serif SC', serif;">
+			<span style="font-size: 0.85rem; color: var(--ink-light);">
+				诗歌加载: <strong style="color: ${uuid ? '#5d4037' : '#a1887f'}; font-weight: normal;">${uuid ? 'OK' : '...'}</strong>
+			</span>
+			<span style="font-size: 0.85rem; color: var(--ink-light);">
+				网站运行状态: <strong style="color: ${dest ? '#5d4037' : '#a1887f'}; font-weight: normal;">${dest ? 'OK' : '...'}</strong>
+			</span>
+		</div>`;
+
+	return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>明朝诗人谱系图</title>
+    <script src="https://cdn.tailwindcss.com"><\/script>
+    <link href="https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&family=Noto+Serif+SC:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #f5f1eb; --bg-secondary: #e8e2d9; --ink-dark: #2c2824;
+            --ink-medium: #4a4640; --ink-light: #8a8580; --rope-color: #3d3833;
+            --accent: #8b4513; --paper: #fdfaf5; --shadow-ink: rgba(44, 40, 36, 0.15);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Noto Serif SC', serif; background: var(--bg-primary); color: var(--ink-dark); min-height: 100vh; overflow-x: hidden; }
+        
+        .paper-texture { position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0; opacity: 0.03; background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E"); }
+        .ink-wash { position: fixed; border-radius: 50%; filter: blur(80px); pointer-events: none; z-index: 0; }
+        .ink-wash-1 { top: -200px; right: -100px; width: 600px; height: 600px; background: radial-gradient(circle, rgba(60, 50, 40, 0.08) 0%, transparent 70%); }
+        .ink-wash-2 { bottom: -150px; left: -100px; width: 500px; height: 500px; background: radial-gradient(circle, rgba(100, 80, 60, 0.06) 0%, transparent 70%); }
+        
+        /* 导航栏样式优化：减小高度，紧凑布局 */
+        .nav-container { 
+            position: sticky; top: 0; z-index: 1000; 
+            padding: 8px 0; /* 减小上下内边距 */
+            background: rgba(245, 241, 235, 0.95); backdrop-filter: blur(10px); 
+            border-bottom: 1px solid rgba(60, 50, 40, 0.1); 
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05); 
+        }
+        .nav-inner { max-width: 1400px; margin: 0 auto; padding: 0 15px; }
+        
+        /* 通用滚动容器样式 */
+        .scroll-row {
+            display: flex; gap: 8px; overflow-x: auto; 
+            padding: 4px 0; /* 减小内边距 */
+            scrollbar-width: none; -ms-overflow-style: none;
+        }
+        .scroll-row::-webkit-scrollbar { display: none; }
+
+        /* 按钮通用样式：更小更紧凑 */
+        .nav-btn, .article-btn {
+            flex-shrink: 0; 
+            padding: 4px 12px; /* 减小内边距 */
+            border-radius: 3px; 
+            cursor: pointer;
+            transition: all 0.3s ease; 
+            font-size: 0.85rem; /* 减小字体 */
+            border: 1px solid rgba(60, 50, 40, 0.2);
+            background: rgba(253, 250, 245, 0.9);
+            color: var(--ink-medium);
+            white-space: nowrap;
+        }
+        
+        /* 文章按钮行 - 第一行 */
+        .article-btn-row {
+            margin-bottom: 6px; /* 两行之间的间距 */
+            border-bottom: 1px solid rgba(60, 50, 40, 0.05);
+            padding-bottom: 6px;
+        }
+        .article-btn {
+            background: rgba(253, 250, 245, 1);
+            border-color: var(--accent);
+            color: var(--ink-dark);
+            font-size: 0.8rem; /* 文章按钮字体稍小 */
+        }
+        .article-btn:hover { background: var(--accent); color: white; }
+        
+        /* 时期按钮行 - 第二行 */
+        .period-btn-row {
+            /* 继承 scroll-row 样式 */
+        }
+        .nav-btn:hover { border-color: var(--accent); color: var(--accent); }
+        .nav-btn.active { background: var(--ink-dark); color: var(--paper); border-color: var(--ink-dark); }
+
+        /* 文章弹窗样式 */
+        .article-modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); z-index: 3000; display: flex; justify-content: center; align-items: center; opacity: 0; visibility: hidden; transition: all 0.4s ease; backdrop-filter: blur(3px); }
+        .article-modal.show { opacity: 1; visibility: visible; }
+        .article-paper { width: 90%; max-width: 800px; max-height: 85vh; background: var(--paper); border: 1px solid rgba(60, 50, 40, 0.2); border-radius: 4px; padding: 50px; position: relative; overflow-y: auto; box-shadow: 0 15px 40px rgba(0,0,0,0.2); transform: translateY(30px) scale(0.95); transition: transform 0.4s ease; }
+        .article-modal.show .article-paper { transform: translateY(0) scale(1); }
+        .article-title { text-align: center; font-family: 'Ma Shan Zheng', cursive; font-size: 2.2rem; color: var(--ink-dark); margin-bottom: 40px; border-bottom: 1px solid rgba(60, 50, 40, 0.1); padding-bottom: 20px; letter-spacing: 0.1em; }
+        .article-body { font-family: 'Noto Serif SC', serif; font-size: 1.1rem; line-height: 2.2; color: var(--ink-medium); text-align: justify; column-count: 1; }
+        @media (min-width: 900px) { .article-body { column-count: 2; column-gap: 40px; column-rule: 1px solid rgba(60, 50, 40, 0.1); } }
+        .article-body p { text-indent: 2em; margin-bottom: 1.5em; }
+        .article-note { margin-top: 2em; padding-top: 1em; border-top: 1px dashed var(--ink-light); font-size: 0.9rem; color: var(--ink-light); white-space: pre-line; }
+        .close-article { position: absolute; top: 20px; right: 20px; width: 32px; height: 32px; background: transparent; border: 1px solid var(--ink-light); border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.3s; color: var(--ink-light); }
+        .close-article:hover { background: var(--ink-dark); border-color: var(--ink-dark); color: white; }
+
+        .header { text-align: center; padding: 60px 20px 40px; position: relative; z-index: 10; }
+        .main-title { font-family: 'Ma Shan Zheng', cursive; font-size: clamp(2.5rem, 8vw, 5rem); color: var(--ink-dark); letter-spacing: 0.3em; margin-bottom: 10px; opacity: 0; transform: translateY(-30px); animation: fadeInDown 1s ease forwards; }
+        .sub-title { font-size: 1rem; color: var(--ink-light); letter-spacing: 0.5em; opacity: 0; animation: fadeInDown 1s ease 0.3s forwards; }
+        @keyframes fadeInDown { to { opacity: 1; transform: translateY(0); } }
+
+        .main-content { display: flex; max-width: 1400px; margin: 0 auto; padding: 20px; gap: 40px; position: relative; z-index: 5; }
+        .timeline-container { flex: 1; position: relative; }
+        .period-section { margin-bottom: 60px; opacity: 0; transform: translateY(40px); transition: all 0.8s ease; }
+        .period-section.visible { opacity: 1; transform: translateY(0); }
+        .period-header { display: flex; align-items: center; margin-bottom: 30px; position: relative; }
+        .period-title { font-family: 'Ma Shan Zheng', cursive; font-size: 1.8rem; color: var(--ink-dark); background: var(--bg-primary); padding-right: 20px; z-index: 2; }
+        .period-line { flex: 1; height: 1px; background: linear-gradient(to right, var(--ink-light), transparent); }
+        
+        .rope-timeline { position: relative; padding-left: 80px; }
+        .rope-line { position: absolute; left: 30px; top: 0; bottom: 0; width: 2px; background: linear-gradient(to bottom, transparent 0%, var(--rope-color) 5%, var(--rope-color) 95%, transparent 100%); }
+        
+        .poet-node { position: relative; margin-bottom: 20px; cursor: pointer; transition: transform 0.3s ease; }
+        .poet-node:hover { transform: translateX(5px); }
+        .knot { position: absolute; left: -58px; top: 50%; transform: translateY(-50%); width: 20px; height: 20px; transition: all 0.3s ease; }
+        .knot svg { width: 100%; height: 100%; stroke: var(--ink-medium); fill: none; stroke-width: 1.5; }
+        .poet-node:hover .knot svg { stroke: var(--accent); filter: drop-shadow(0 0 4px rgba(139, 69, 19, 0.4)); }
+        .poet-node.active .knot svg { stroke: var(--accent); fill: rgba(139, 69, 19, 0.2); }
+        
+        .poet-name { display: inline-block; padding: 8px 20px; background: var(--paper); border: 1px solid rgba(60, 50, 40, 0.15); border-radius: 2px; font-size: 1rem; color: var(--ink-dark); transition: all 0.3s ease; position: relative; }
+        .poet-name::before { content: ''; position: absolute; left: -15px; top: 50%; width: 15px; height: 1px; background: var(--ink-light); transform: translateY(-50%); }
+        .poet-node:hover .poet-name { border-color: var(--accent); color: var(--accent); box-shadow: 0 2px 10px var(--shadow-ink); }
+        .poet-node.active .poet-name { background: var(--ink-dark); color: var(--paper); border-color: var(--ink-dark); }
+
+        .poet-detail { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%) scale(0.9); width: 90%; max-width: 600px; max-height: 85vh; background: var(--paper); border: 1px solid rgba(60, 50, 40, 0.2); border-radius: 4px; padding: 0; z-index: 2000; opacity: 0; visibility: hidden; transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2); overflow: hidden; }
+        .poet-detail.show { opacity: 1; visibility: visible; transform: translate(-50%, -50%) scale(1); }
+        .detail-header { padding: 25px 30px; background: linear-gradient(135deg, var(--ink-dark) 0%, var(--ink-medium) 100%); position: relative; }
+        .detail-header::after { content: ''; position: absolute; bottom: -10px; left: 30px; right: 30px; height: 1px; background: linear-gradient(90deg, transparent, var(--accent), transparent); }
+        .detail-name { font-family: 'Ma Shan Zheng', cursive; font-size: 2rem; color: var(--paper); margin-bottom: 5px; }
+        .detail-period { font-size: 0.85rem; color: rgba(255, 255, 255, 0.6); }
+        .detail-body { padding: 25px 30px; max-height: 60vh; overflow-y: auto; }
+        .detail-intro { font-size: 0.95rem; line-height: 1.9; color: var(--ink-medium); margin-bottom: 20px; text-align: justify; }
+        .detail-link { display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px; background: var(--bg-secondary); color: var(--ink-dark); text-decoration: none; border-radius: 4px; font-size: 0.9rem; transition: all 0.3s ease; }
+        .detail-link:hover { background: var(--accent); color: white; }
+        .detail-close { position: absolute; top: 15px; right: 15px; width: 30px; height: 30px; background: rgba(255, 255, 255, 0.1); border: none; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.3s ease; }
+        .detail-close svg { width: 16px; height: 16px; stroke: rgba(255, 255, 255, 0.7); }
+        .detail-close:hover { background: rgba(255, 255, 255, 0.2); }
+
+        .overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.4); z-index: 1500; opacity: 0; visibility: hidden; transition: all 0.3s ease; backdrop-filter: blur(2px); }
+        .overlay.show { opacity: 1; visibility: visible; }
+
+        .info-panel { width: 280px; flex-shrink: 0; position: sticky; top: 160px; height: fit-content; align-self: flex-start; }
+        .info-card { background: var(--paper); border: 1px solid rgba(60, 50, 40, 0.15); border-radius: 4px; padding: 25px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.03); }
+        .info-title { font-family: 'Ma Shan Zheng', cursive; font-size: 1.3rem; color: var(--ink-dark); margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid rgba(60, 50, 40, 0.1); }
+        .info-stat { display: flex; justify-content: space-between; padding: 8px 0; font-size: 0.9rem; color: var(--ink-medium); }
+        .info-stat span:last-child { color: var(--accent); font-weight: 600; }
+        .stat-number { font-family: 'Ma Shan Zheng', cursive; font-size: 2.5rem; color: var(--accent); text-align: center; margin: 10px 0; }
+
+        @media (max-width: 900px) { .main-content { flex-direction: column; } .info-panel { width: 100%; position: relative; top: 0; order: -1; margin-bottom: 30px; } .rope-timeline { padding-left: 60px; } .rope-line { left: 20px; } .knot { left: -48px; } }
+    </style>
+</head>
+<body>
+    <div class="paper-texture"></div>
+    <div class="ink-wash ink-wash-1"></div>
+    <div class="ink-wash ink-wash-2"></div>
+
+    <header class="header">
+        <h1 class="main-title">明朝诗人谱系图</h1>
+        <p class="sub-title">公元一三六八年至一六四四年</p>
+		${statusUI}
+    </header>
+
+    <nav class="nav-container" id="navContainer">
+        <div class="nav-inner">
+            <!-- 第一行：文章目录 -->
+            <div class="article-btn-row scroll-row">
+                <button class="article-btn" data-article="qian">为钱谦益鸣不平文</button>
+                <button class="article-btn" data-article="baimen">白门衰柳记</button>
+                <button class="article-btn" data-article="yushan">吊钱虞山文</button>
+                <button class="article-btn" data-article="yuanzhong">念与袁珂雪昔游</button>
+            </div>
+            <!-- 第二行：时期目录 -->
+            <div class="period-btn-row scroll-row" id="navScroll"></div>
+        </div>
+    </nav>
+
+    <main class="main-content">
+        <div class="timeline-container" id="timelineContainer"></div>
+        <aside class="info-panel">
+            <div class="info-card">
+                <h3 class="info-title">统计概览</h3>
+                <div class="stat-number" id="totalCount">100</div>
+                <p style="text-align: center; color: var(--ink-light); font-size: 0.85rem;">位明朝诗人收录</p>
+            </div>
+            <div class="info-card">
+                <h3 class="info-title">各时期分布</h3>
+                <div id="statsContainer"></div>
+            </div>
+        </aside>
+    </main>
+
+    <div class="article-modal" id="articleModal">
+        <div class="article-paper">
+            <button class="close-article" id="closeArticle">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+            <h2 class="article-title" id="articleTitle"></h2>
+            <div class="article-body" id="articleBody"></div>
+        </div>
+    </div>
+
+    <div class="overlay" id="overlay"></div>
+    <div class="poet-detail" id="poetDetail">
+        <div class="detail-header">
+            <button class="detail-close" id="detailClose"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+            <h3 class="detail-name" id="detailName"></h3>
+            <p class="detail-period" id="detailPeriod"></p>
+        </div>
+        <div class="detail-body">
+            <p class="detail-intro" id="detailIntro"></p>
+            <a href="#" class="detail-link" id="detailLink" target="_blank">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                查看百度百科
+            </a>
+        </div>
+    </div>
+
+    <script>
+        // 文章数据 (已修复转义)
+        const articlesData = {
+            qian: {
+                title: "为钱谦益鸣不平文",
+                content: '<p>迨夫崇祯弘光二朝，北人据定，大兵割剧，中夏神器动摇，南北士民或勾连外族，或喧乱朝堂，或弹劾能吏，或对泣清淡。而九夏之中一夫专擅，使中州禹界人造饥年，饿殍塞野，唯号称爱民，而三饷日苛，使民负日乏，唯勤政躬亲，而刚愎杀伐，使臣工异志。烈皇帝煤山崩殂，社稷丘墟。马士英、阮大铖辈，弗克靖难，反拥福藩于金陵，称弘光朝，徒饰虚文，无救危亡。</p><p>洎乎督师维扬，坐拥十万，徒效孤城死守，全无远略宏图。北骑叩关，诸镇解体，竟无沐胥之援。迨夫芜城陷日，血涌蜀冈，魂迷隋苑。节概徒存，韬钤不谙，空怀一死之报，终陷百万之生。维扬既破，长江天堑，不复为固。贼师南下，金陵旦夕难保。</p><p>当是时，独钱宗伯谦益，审时度势，心怀愤悱，暂图隐忍，力图贼后缓复中华，其弟子瞿式耜，朱成功等，既忍死图存，志复衣冠之士，钱宗伯虽蒙贰臣之诟，实存济世之心。开城迎降，禁止杀掠，使六朝古都免为屠城；护持典籍，联络士绅，令江南文脉不绝。其背骂名而行大义，舍私节而全苍生，谓之“保全东南三百里，活计秦淮十万户”，非虚言哉！</p><p>其后二十余年左右奔走，络引豪杰，欲济禹土，屏夷复夏，数度下狱，家财尽散，终得国姓爷伐举北上，震恐东南，围城南都，不贷时命两亏，延平王败走，宗伯之郁愤想可而知，而至于年逾古稀，犹著诗数卷，标正华夷，痛斥生酋。</p>'
+            },
+            baimen: {
+                title: "白门衰柳记",
+                content: '<p>白门柳色，又绿四年；桃叶渡头，空留一梦。忆昔停车问渡，系马垂杨，正当二八春深，三千粉腻。尔乃章台选胜，北里征歌，惯看板桥明月，醉拂钓渚西风。薛涛笺小，曾题八韵之诗；卓氏垆边，共倒双瓶之酒。谓是青溪小姑，长伴蒋侯之庙；不图巫峡行雨，竟逐宋玉之舟。</p><p>未几，除书忽下，谪授辰阳。五溪毒雾，蒸为行客之衣；三峡哀猿，啼作离人之泪。壶觞既散，裙屐空留。指酉水而辞行，望钟山而益渺。初谓虽隔蛮荒，犹通鲤素；岂期渐远瘴疠，竟断鸿鳞。三年不见，已疑卫玠之神；万里传书，空说徐妃之半。</p><p>今岁买舟东下，重理旧游。乌衣巷口，燕子犹寻王谢之家；白鹭洲边，芦花尽染潇湘之泪。乃至访依依之旧院，问冉冉之余香。则见苔蚀临春之阁，尘埋结绮之楼。邻姬告予以故实：自别永诀，一病不起。埋香之冢，早宿草于春深；碎玉之钩，已委尘于秋老。</p><p>呜呼！逝水难回，落花不再。昔年握手之地，今成歧路之悲；昔日并肩之石，已作忘情之碧。武陵溪远，空忆刘阮之逢；华岳云深，无复萧史之约。剩有当年半臂，犹存韩寿之香；可怜此夜独眠，谁荐真娘之酒？</p><p>乃知世缘如幻，情障皆空。师雄梦醒，罗浮之月已斜；杜牧重来，豆蔻之梢空折。遂援笔志痛，刊石埋忧。庶几夜台有知，晓风残月，犹忆秦淮；碧血难销，暮雨朝云，重归楚岫。</p><p>铭曰：钟山苍苍，江水泱泱。佳人何处？白杨萧萧。四年一梦，万里孤桡。音沉瘴海，骨冷虹桥。重来崔护，不见妖娆。苔侵旧履，尘锁轻桡。情天一劫，孽海双漂。临风陨涕，莫问前朝。</p>'
+            },
+            yushan: {
+                title: "吊钱虞山文",
+                content: '<p>余以六甲之岁，俶装褰裳，将访虞山之下。盖欲问《春秋》于绛云之楼，求残稿于拂水文园也。乃裹三日粮，携一筇竹，溯茸城而上，涉尚湖而北。时则霜凋夏木，风踬寒蜩，白雁叫乎荒汀，苍烟埋乎废陇。</p><p>初，余过拂水岩，见崩崖谲石，犹带前朝之色；而寒潭清泚，已非旧时之波。遂扪葛攀萝，访牧斋之故居。至则徒见颓垣断甃，卧于苍苔白露之中；剩础残砖，杂以枯杨衰草而已。入门，有老阍羸卧于败牖之下，目眚而耳聋，告余曰：“若所谓绛云者，早随劫火，化作五鹿之烟；而拂水主人，亦以去岁谢世，今其榇尚未归土，暂厝于西阡之破庙中。”</p><p>余闻之，不觉芒刺在背，涕泗交颐。抚孤松而徘徊，望东南而陨涕。忆昔年之盛，此老握灵蛇之珠，家藏充栋之籍，门停问字之车，座满曳裾之客。方其领袖东林，斟酌风雅，何其盛也！曾几何时，而兔园梨枣，尽委于刍牧；鸱夷皮骨，终饱于乌鸢。虽云以黄冠故乡，未剃周顒之发；然既操柔翰入洛，已惭茂弘之尘。今则葛帔练裙，空传列女之传；芒鞋布袜，谁续高士之图？</p><p>于是踯躅荒庭，摩挲断碣。见石阑干外，旧日之海棠榻已为他人之薪；土窟龛中，当年之藏书版尽作九京之灰。俯仰陈迹，实为寒心。乃知夷甫诸人，终贻神州之陆沉；夷齐高躅，徒托首阳之薇蕨。广陵散之绝响，不仅在叔夜之临刑；山阳笛之哀音，已先于向秀之经旧。</p><p>余遂出，复访诸旧时文苑。至张司马之门，则门巷萧然，唯余槐柳；过杨忠文之第，则阶除寂寞，但见蓬蒿。或已委骨于荒阡，空留碣石；或犹拖躯于漏屋，但剩斲轮。昔之开邺下之筵、泛西湖之棹者，今皆与草木同腐，与猿鹤为群。而余也以桑海余生，羊昙老泪，独对西风，徒吟《黍离》之什；空扶落日，谁听《薤露》之歌？</p><p>归去来兮！田园将芜，胡不归？乃歌曰：“绛云不复烧，拂水空自流。虞山一抔土，何处访黔娄？西州门下客，东陵故侯瓜。茫茫天地闭，无地著亡命之臣；惨惨霜霰零，有谁怜广武之叹？”歌阕，山鬼夜啼，邻鸡惊起。余遂循旧路而返，唯见晓星数点，堕于枯枝；残月半规，挂于断堑。此身虽在，已同望帝之魂；他年作传，谁题陶潜之墓？是为记。</p>'
+            },
+            yuanzhong: {
+                title: "念与袁珂雪昔游",
+                content: '<p>维天启癸亥之岁，寒江树槁，楚泽冰坚。余方拥褐于夷门之墟，忽闻公安之讣，瑶琴未碎而先绝，玉轸方调而遽阕。呜呼！此非独珂雪之斋空，实乃性灵之府圮也。夫以子之才，岂真楚狂之伍；以子之遇，竟类山阳之邻。岂造物之忌才，抑斯文之将坠？爰作短章，用招孤魄。</p><p>忆昔万历之季，中原气盛，王李之帜方张，袁氏之鼎已峙。伯修探性命于白苏，中郎抉肝胆于花雨，而子独裒冰雪为肠，掬澄江为句。当斯时也，子与两兄，并辔燕市，抵掌秦楼。诵则倾城，挥毫则风雨。读子之《游居杮录》，恍见宗炳卧游，许询清论；览子之《珂雪集》，直似张绪当年，卫玠入洛。子之言曰：“文章之性灵，譬之山水之眉目。”此语一出，竟陵之徒咋舌，历下之辈裂眦。子独携筇屐，浮家泛宅，西陵之猿为泣，巫峡之云作衣。潇湘夜雨，尽入奚囊；鄂渚秋帆，悉归麈尾。</p><p>曾几何时，伯修化去，中郎继徂，子遂孑然独立于江潭之上。昔之三凤来庭，今则一鸿度影。子于是愈肆其荒唐，益逞其奇诡。借墨渖以哭世，托酒盏以骂天。夫楚固悲秋之地，宋玉故宅犹在；而子之文，又过《九辩》之声。岂以《薤露》之章，预写《广陵》之散耶？</p><p>今子逝矣，楚江空碧，谁复唱《白雪》之俦？郢垩既尽，孰为运斤成风？昔人谓袁氏兄弟，如竹林之嵇阮，洛下之三张。今则霜凋玉树，雾隐青骢。子所著书，零落江湖；子所游处，芜没荆杞。昔与子论文于金粟园中，子引觞自酌，顾谓余曰：“人生飘忽，宁作袁彦道之赌徒，勿为扬子云之寂寞。”言犹在耳，而子已归道山矣。</p><p>呜呼！性灵未泯，而躯壳已陈；笔墨犹新，而墓草将宿。以此哀悼，知无济于逝川；用此艰深，庶可酬乎知己。楚些魂兮，归来！江波淼淼，岂无湘累之招？山鬼冥冥，应有宋玉之对。聊奠椒浆，伏惟尚飨。</p><div class="article-note"><strong>注此文中用典之僻奥，以见体制：</strong>\\n珂雪斋：袁中道室名，取“清凉如冰雪”意，喻其性灵说\\n宗炳卧游：南朝宋画家宗炳，病还江陵，叹曰“老疾俱至，名山恐难遍睹，唯澄怀观道，卧以游之”\\n许询：东晋玄言诗人，与支遁、王羲之游，以清谈著称\\n张绪：南朝齐吴郡人，风姿清雅，武帝植蜀柳于灵和殿前，叹曰“此杨柳风流可爱，似张绪当年”\\n郢垩运斤：庄子“郢人垩鼻，匠石运斤成风”之典，喻知音难觅\\n金粟园：袁中道在公安的园林，其诗文常及之\\n袁彦道：晋袁躭，字彦道，性不羁，好赌，时人谓其“通脱”\\n楚些：《楚辞·招魂》句尾用“些”字，故称楚些</div>'
+            }
+        };
+
+        // 诗人数据 (完整版)
+        const poetsData = {
+            "明初诗人": { period: "1368-1424", intro: "元末明初过渡时期，诗人多有元末遗风。", poets: [ { name: "高启", desc: "字季迪，号青丘子，长洲人。明初十才子之首。诗雄健豪放。被腰斩。有《高太史大全集》。" }, { name: "刘基", desc: "字伯温，号犁眉，青田人。明朝开国元勋。诗古朴雄放。有《诚意伯文集》。" }, { name: "宋濂", desc: "字景濂，号潜溪，金华人。明初文坛领袖。散文成就极高。有《宋学士文集》。" }, { name: "张羽", desc: "字来仪，浔阳人。吴中四杰之一。诗清丽婉约。投水死。有《静居集》。" }, { name: "徐贲", desc: "字幼文，号北郭生。吴中四杰之一。工诗善画。有《北郭集》。" }, { name: "杨基", desc: "字孟载，号眉庵。吴中四杰之一。诗清俊流丽。有《眉庵集》。" }, { name: "袁凯", desc: "字景文，号海叟，华亭人。以《白燕》诗闻名。有《海叟集》。" }, { name: "贝琼", desc: "字廷琚，崇德人。师从杨维桢。有《清江贝先生文集》。" }, { name: "汪广洋", desc: "字朝宗，高邮人。官至右丞相。诗清刚有力。有《凤池吟稿》。" }, { name: "孙蕡", desc: "字仲衍，顺德人。岭南诗派代表。诗雄直豪放。" }, { name: "王冕", desc: "字元章，号煮石山农，诸暨人。画墨梅著称。诗自然率真。有《竹斋集》。" }, { name: "陶宗仪", desc: "字九成，号南村，黄岩人。著有《南村辍耕录》。" }, { name: "杨维桢", desc: "字廉夫，号铁崖，诸暨人。铁崖体代表。诗奇崛险怪。有《东维子集》。" }, { name: "张以宁", desc: "字志道，古田人。诗高雅清奇。有《翠屏集》。" }, { name: "危素", desc: "字太朴，金溪人。元末明初学者。" } ] },
+            "永乐至天顺": { period: "1425-1464", intro: "台阁体盛行时期。", poets: [ { name: "杨士奇", desc: "名寓，字士奇，泰和人。三杨之首。诗平正典雅。有《东里集》。" }, { name: "杨荣", desc: "字勉仁，建安人。三杨之一。诗雍容华贵。有《杨文敏集》。" }, { name: "杨溥", desc: "字弘济，石首人。三杨之一。" }, { name: "解缙", desc: "字大绅，吉水人。才子诗风。主编《永乐大典》。有《解文毅公集》。" }, { name: "于谦", desc: "字廷益，号节庵，钱塘人。民族英雄。诗刚正不阿。代表作《石灰吟》。有《于忠肃公集》。" }, { name: "薛瑄", desc: "字德温，号敬轩，河津人。理学家。诗淡雅。有《读书录》。" }, { name: "李东阳", desc: "字宾之，号西涯，茶陵人。茶陵派领袖。诗典雅工丽。有《怀麓堂集》。" }, { name: "程敏政", desc: "字克勤，号篁墩，休宁人。学问渊博。有《篁墩集》。" }, { name: "沈周", desc: "字启南，号石田，长洲人。吴门画派创始人。诗清新自然。有《石田集》。" }, { name: "陈献章", desc: "字公甫，号石斋，新会人。心学先驱。诗有理趣。有《白沙子全集》。" }, { name: "庄昶", desc: "字孔阳，号木斋，江浦人。诗平淡自然。" }, { name: "吴宽", desc: "字原博，号匏庵，长洲人。成化状元。诗文深厚。有《匏翁家藏集》。" }, { name: "王鏊", desc: "字济之，号守溪，吴县人。文学家。有《姑苏志》。" } ] },
+            "前七子": { period: "1475-1530", intro: "明中期文学复古运动。", poets: [ { name: "李梦阳", desc: "字献吉，号空同子，庆阳人。前七子领袖。诗雄健豪放。有《空同集》。" }, { name: "何景明", desc: "字仲默，号大复，信阳人。前七子领袖。诗秀朗清新。有《大复集》。" }, { name: "徐祯卿", desc: "字昌谷，吴县人。前七子之一。才情高逸。有《迪功集》。" }, { name: "边贡", desc: "字廷实，号华泉，历城人。前七子之一。诗清婉。有《华泉集》。" }, { name: "康海", desc: "字德涵，号对山，武功人。前七子之一。状元。擅长散曲。有《对山集》。" }, { name: "王九思", desc: "字敬夫，号渼陂，鄠县人。前七子之一。散曲著名。有《渼陂集》。" }, { name: "王廷相", desc: "字子衡，号浚川，仪封人。前七子之一。理学家。诗古朴。有《王氏家藏集》。" } ] },
+            "吴门四才子": { period: "1470-1559", intro: "吴门诗派代表。", poets: [ { name: "唐寅", desc: "字伯虎，号六如居士，吴县人。画家、诗人。诗风流倜傥。有《六如居士集》。" }, { name: "文徵明", desc: "原名壁，字徵明，号衡山，长洲人。诗书画三绝。有《甫田集》。" }, { name: "祝允明", desc: "字希哲，号枝山，长洲人。书法家。诗文佳。有《怀星堂集》。" }, { name: "张灵", desc: "字梦晋，吴县人。唐寅好友。早卒。" } ] },
+            "后七子": { period: "1514-1590", intro: "继承前七子复古主张。", poets: [ { name: "李攀龙", desc: "字于鳞，号沧溟，历城人。后七子领袖。诗雄浑。有《沧溟集》。" }, { name: "王世贞", desc: "字元美，号弇州山人，太仓人。后七子领袖。著述极丰。有《弇州山人四部稿》。" }, { name: "谢榛", desc: "字茂秦，号四溟山人，临清人。后七子之一。布衣。有《四溟集》。" }, { name: "宗臣", desc: "字子相，号方城，兴化人。后七子之一。散文《报刘一丈书》著名。有《宗子相集》。" }, { name: "梁有誉", desc: "字公实，号兰汀，顺德人。后七子之一。有《兰汀存稿》。" }, { name: "徐中行", desc: "字子舆，号龙湾，长兴人。后七子之一。有《天目先生集》。" }, { name: "吴国伦", desc: "字明卿，号川楼，兴国人。后七子之一。有《甔甀洞稿》。" } ] },
+            "其他明中期名家": { period: "1488-1566", intro: "明代中期其他重要诗人。", poets: [ { name: "杨慎", desc: "字用修，号升庵，新都人。正德状元。三大才子之首。《临江仙》作者。有《升庵集》。" }, { name: "高叔嗣", desc: "字子业，号苏门，祥符人。诗清省。有《苏门集》。" }, { name: "华察", desc: "字子潜，号鸿山，无锡人。诗雅正。有《岩居稿》。" }, { name: "王问", desc: "字子裕，号仲山，无锡人。画家兼诗人。有《仲山诗选》。" }, { name: "陈束", desc: "字约之，号后冈，鄞县人。嘉靖八才子之一。有《后冈集》。" }, { name: "李开先", desc: "字伯华，号中麓，章丘人。戏曲家。作《宝剑记》。有《李中麓闲居集》。" }, { name: "唐顺之", desc: "字应德，号荆川，武进人。唐宋派代表。抗倭名将。有《荆川先生文集》。" }, { name: "归有光", desc: "字熙甫，号震川，昆山人。散文大家。有《震川先生集》。" }, { name: "茅坤", desc: "字顺甫，号鹿门，归安人。古文家。编《唐宋八大家文钞》。" }, { name: "皇甫汸", desc: "字子循，号百泉，长洲人。皇甫四杰之一。有《皇甫司勋集》。" }, { name: "皇甫涍", desc: "字子安，号少玄，长洲人。有《皇甫少玄集》。" }, { name: "王维桢", desc: "字允宁，号石叠，华州人。诗学唐音。有《存笥稿》。" } ] },
+            "公安派": { period: "1568-1624", intro: "主张独抒性灵。", poets: [ { name: "袁宗道", desc: "字伯修，号石浦，公安人。公安派代表。有《白苏斋类稿》。" }, { name: "袁宏道", desc: "字中郎，号石公，公安人。公安派主将。性灵说倡导者。有《袁中郎全集》。" }, { name: "袁中道", desc: "字小修，公安人。公安派代表。有《珂雪斋集》。" } ] },
+            "竟陵派": { period: "1574-1637", intro: "主张幽深孤峭。", poets: [ { name: "钟惺", desc: "字伯敬，号退谷，竟陵人。竟陵派代表。有《隐秀轩集》。" }, { name: "谭元春", desc: "字友夏，竟陵人。竟陵派代表。有《谭友夏合集》。" } ] },
+            "晚明名士": { period: "1550-1644", intro: "晚明诗风求变。", poets: [ { name: "汤显祖", desc: "字义仍，号海若，临川人。戏剧大师，《牡丹亭》作者。有《玉茗堂全集》。" }, { name: "徐渭", desc: "字文长，号青藤道士，山阴人。奇才。诗书画三绝。有《徐文长三集》。" }, { name: "屠隆", desc: "字长卿，号赤水，鄞县人。诗文秀逸。有《由拳集》。" }, { name: "王稚登", desc: "字百谷，武进人。吴门后劲。有《王百谷集》。" }, { name: "陈继儒", desc: "字仲醇，号眉公，华亭人。隐士。小品文名家。有《陈眉公全集》。" }, { name: "董其昌", desc: "字玄宰，号思白，华亭人。书画大家。有《容台集》。" }, { name: "李贽", desc: "字卓吾，泉州人。思想家。童心说。有《焚书》。" }, { name: "张岱", desc: "字宗子，号陶庵，山阴人。散文名家。《陶庵梦忆》作者。有《琅嬛文集》。" } ] },
+            "明末忠烈": { period: "1584-1646", intro: "明末抗清志士。", poets: [ { name: "倪元璐", desc: "字玉汝，号鸿宝，上虞人。明末名臣。自缢殉国。有《倪文贞集》。" }, { name: "黄道周", desc: "字幼平，号石斋，漳浦人。明末大儒。抗清就义。有《石斋集》。" }, { name: "陈子龙", desc: "字卧子，号大樽，松江人。几社领袖。投水殉国。有《陈忠裕公全集》。" }, { name: "夏完淳", desc: "字存古，松江人。少年英雄。就义时年仅十七。有《南冠草》。" }, { name: "张煌言", desc: "字玄著，号苍水，鄞县人。抗清英雄。有诗史之称。有《张苍水集》。" }, { name: "瞿式耜", desc: "字起田，号稼轩，常熟人。抗清名臣。殉国。有《瞿忠宣公集》。" } ] },
+            "江左三大家": { period: "1582-1673", intro: "明末清初诗坛盟主。", poets: [ { name: "钱谦益", desc: "字受之，号牧斋，常熟人。江左三大家之首。有《初学集》。" }, { name: "吴伟业", desc: "字骏公，号梅村，太仓人。梅村体创始者。《圆圆曲》作者。有《梅村家藏稿》。" }, { name: "龚鼎孳", desc: "字孝升，号芝麓，合肥人。江左三大家之一。有《定山堂集》。" } ] },
+            "岭南三大家": { period: "1602-1696", intro: "清初岭南诗派。", poets: [ { name: "屈大均", desc: "字翁山，番禺人。反清复明志士。有《翁山诗外》。" }, { name: "陈恭尹", desc: "字元孝，顺德人。有《独漉堂集》。" }, { name: "梁佩兰", desc: "字芝五，南海人。有《六莹堂集》。" } ] },
+            "明末遗民": { period: "1613-1692", intro: "明清之际遗民诗人。", poets: [ { name: "方以智", desc: "字密之，桐城人。思想家。有《浮山集》。" }, { name: "钱澄之", desc: "字饮光，桐城人。有《田间集》。" }, { name: "顾炎武", desc: "字宁人，号亭林，昆山人。思想家。天下兴亡匹夫有责。有《亭林诗文集》。" }, { name: "吴嘉纪", desc: "字宾贤，泰州人。遗民诗人。有《陋轩诗》。" }, { name: "归庄", desc: "字尔礼，昆山人。狂士。有《归庄集》。" }, { name: "傅山", desc: "字青主，阳曲人。医学家。拒不仕清。有《霜红龛集》。" }, { name: "龚贤", desc: "字半千，昆山人。金陵八家之一。有《香草堂集》。" }, { name: "杜濬", desc: "字于皇，黄冈人。有《变雅堂文集》。" }, { name: "申涵光", desc: "字孚孟，永年人。有《聪山集》。" } ] },
+            "东林党人": { period: "1573-1625", intro: "东林书院学派。", poets: [ { name: "文震孟", desc: "字文起，长洲人。天启状元。有《姑苏名贤小记》。" }, { name: "周顺昌", desc: "字景文，吴县人。死于狱中。有《烬余集》。" }, { name: "左光斗", desc: "字遗直，桐城人。死于狱中。有《左忠毅公集》。" }, { name: "祁彪佳", desc: "字弘吉，山阴人。投水自尽。有《祁忠惠公集》。" } ] },
+            "其他名家": { period: "1330-1662", intro: "其他明朝重要诗人。", poets: [ { name: "罗贯中", desc: "名本，太原人。《三国演义》作者。" }, { name: "施耐庵", desc: "名子安，苏州人。《水浒传》作者。" }, { name: "张名振", desc: "字侯服，江宁人。南明抗清名将。" }, { name: "郑成功", desc: "本名森，字大木，南安人。民族英雄。" } ] }
+        };
+
+        const knotSVG = '<svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="8" stroke-width="1.5"/><circle cx="20" cy="20" r="4" stroke-width="1"/><path d="M12 20 Q8 12, 20 8 Q32 12, 28 20 Q32 28, 20 32 Q8 28, 12 20" stroke-width="1"/></svg>';
+
+        document.addEventListener('DOMContentLoaded', function() { 
+            initArticleModal(); 
+            initNavigation(); 
+            initTimeline(); 
+            initStats(); 
+            initInteractions(); 
+            initScrollReveal(); 
+        });
+
+        function initArticleModal() {
+            const modal = document.getElementById('articleModal');
+            const titleEl = document.getElementById('articleTitle');
+            const bodyEl = document.getElementById('articleBody');
+            const closeBtn = document.getElementById('closeArticle');
+
+            document.querySelectorAll('.article-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const key = btn.dataset.article;
+                    const article = articlesData[key];
+                    if (article) {
+                        titleEl.textContent = article.title;
+                        bodyEl.innerHTML = article.content;
+                        modal.classList.add('show');
+                    }
+                });
+            });
+
+            closeBtn.addEventListener('click', () => modal.classList.remove('show'));
+            modal.addEventListener('click', (e) => { if (e.target === modal) modal.classList.remove('show'); });
+        }
+
+        function initNavigation() {
+            const navScroll = document.getElementById('navScroll');
+            let html = ''; Object.keys(poetsData).forEach((period) => { html += '<button class="nav-btn" data-period="' + period + '">' + period + '</button>'; });
+            navScroll.innerHTML = html;
+            navScroll.querySelectorAll('.nav-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    const period = this.dataset.period; const section = document.querySelector('[data-section="' + period + '"]');
+                    if (section) { const navHeight = document.getElementById('navContainer').offsetHeight; const sectionTop = section.getBoundingClientRect().top + window.pageYOffset; window.scrollTo({ top: sectionTop - navHeight - 20, behavior: 'smooth' }); }
+                });
+            });
+        }
+
+        function initTimeline() {
+            const container = document.getElementById('timelineContainer'); let html = '';
+            Object.entries(poetsData).forEach(([period, data]) => {
+                html += '<section class="period-section" data-section="' + period + '"><div class="period-header"><h2 class="period-title">' + period + '</h2><div class="period-line"></div></div><p style="color: var(--ink-light); margin-bottom: 20px; padding-left: 10px; font-size: 0.9rem;">' + data.period + ' · ' + data.intro + '</p><div class="rope-timeline"><div class="rope-line"></div>';
+                data.poets.forEach((poet, idx) => { html += '<div class="poet-node" data-period="' + period + '" data-index="' + idx + '"><div class="knot">' + knotSVG + '</div><span class="poet-name">' + poet.name + '</span></div>'; });
+                html += '</div></section>';
+            });
+            container.innerHTML = html;
+        }
+
+        function initStats() {
+            const statsContainer = document.getElementById('statsContainer'); let html = '';
+            Object.entries(poetsData).forEach(([period, data]) => { html += '<div class="info-stat"><span>' + period + '</span><span>' + data.poets.length + '人</span></div>'; });
+            statsContainer.innerHTML = html; animateNumber('totalCount', 0, 100, 1500);
+        }
+        
+        function animateNumber(elementId, start, end, duration) { const element = document.getElementById(elementId); if (!element) return; const startTime = performance.now(); function update(currentTime) { const elapsed = currentTime - startTime; const progress = Math.min(elapsed / duration, 1); const easeOut = 1 - Math.pow(1 - progress, 3); element.textContent = Math.floor(start + (end - start) * easeOut); if (progress < 1) requestAnimationFrame(update); } requestAnimationFrame(update); }
+
+        function initInteractions() {
+            const overlay = document.getElementById('overlay'); const detail = document.getElementById('poetDetail'); const closeBtn = document.getElementById('detailClose');
+            document.querySelectorAll('.poet-node').forEach(node => { node.addEventListener('click', function() { const period = this.dataset.period; const index = parseInt(this.dataset.index); const poet = poetsData[period].poets[index]; showPoetDetail(poet, period, this); }); });
+            function closeDetail() { overlay.classList.remove('show'); detail.classList.remove('show'); document.querySelectorAll('.poet-node').forEach(n => n.classList.remove('active')); }
+            closeBtn.addEventListener('click', closeDetail); overlay.addEventListener('click', closeDetail); 
+            document.addEventListener('keydown', function(e) { if (e.key === 'Escape') { closeDetail(); document.getElementById('articleModal').classList.remove('show'); } });
+        }
+
+        function showPoetDetail(poet, period, node) {
+            const overlay = document.getElementById('overlay'); const detail = document.getElementById('poetDetail');
+            document.getElementById('detailName').textContent = poet.name; document.getElementById('detailPeriod').textContent = poetsData[period].period; document.getElementById('detailIntro').textContent = poet.desc;
+            document.getElementById('detailLink').href = 'https://baike.baidu.com/item/' + encodeURIComponent(poet.name);
+            document.querySelectorAll('.poet-node').forEach(n => n.classList.remove('active')); node.classList.add('active');
+            overlay.classList.add('show'); detail.classList.add('show');
+        }
+
+        function initScrollReveal() {
+            const navButtons = document.querySelectorAll('.nav-btn'); const navContainer = document.getElementById('navContainer'); const navHeight = navContainer.offsetHeight;
+            const sectionObserver = new IntersectionObserver((entries) => { entries.forEach(entry => { if (entry.isIntersecting) entry.target.classList.add('visible'); }); }, { threshold: 0.1 });
+            const navObserver = new IntersectionObserver((entries) => { entries.forEach(entry => { if (entry.isIntersecting) { const period = entry.target.dataset.section; if (period) { navButtons.forEach(btn => { btn.classList.toggle('active', btn.dataset.period === period); }); } } }); }, { threshold: 0, rootMargin: '-' + (navHeight + 10) + 'px 0px -70% 0px' });
+            document.querySelectorAll('.period-section').forEach(section => { sectionObserver.observe(section); navObserver.observe(section); });
+        }
+    <\/script>
+</body>
+</html>`;
+}
