@@ -1,0 +1,101 @@
+export default {
+	async fetch(request, env, ctx) {
+		const targetHost = env.DESTINATION;
+		const uuid = env.UUID || '';
+		const url = new URL(request.url);
+		const currentHost = request.headers.get('Host');
+
+		if (uuid && url.pathname === `/${uuid}/sub`) {
+			if (!targetHost) {
+				return new Response('Destination not configured', { status: 500 });
+			}
+			
+			try {
+				const targetUrl = new URL(request.url);
+				targetUrl.hostname = targetHost;
+
+				const headers = new Headers(request.headers);
+				headers.set('X-Forwarded-Host', currentHost);
+
+				const response = await fetch(targetUrl.toString(), {
+					method: request.method,
+					headers: headers,
+				});
+				
+				return new Response(await response.text(), {
+					headers: response.headers
+				});
+			} catch (err) {
+				return new Response('Subscription fetch failed: ' + err.message, { status: 502 });
+			}
+		}
+
+		if (request.headers.get('Upgrade') === 'websocket') {
+			if (!targetHost) {
+				return new Response('Destination not configured for WebSocket', { status: 500 });
+			}
+			return await handleWebSocketProxy(targetHost, request, currentHost);
+		}
+
+		return new Response(getSimpleHtml(uuid, targetHost), {
+			headers: {
+				'Content-Type': 'text/html; charset=utf-8'
+			}
+		});
+	}
+};
+
+function getSimpleHtml(uuid, dest) {
+	return `<!DOCTYPE html><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>UFO</title>
+<style>body{min-height:100vh;display:flex;justify-content:center;align-items:center;background:linear-gradient(135deg,#0f0c29,#302b63,#24243e);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#fff;text-align:center}.container{padding:40px}h1{margin-bottom:20px}.status{margin:10px 0;font-size:18px}</style>
+<div class="container"><h1>🛸 UFO Service</h1><div class="status">UUID: ${uuid?'✓':'✗'}</div><div class="status">Destination: ${dest?'✓':'✗'}</div></div>`;
+}
+
+async function handleWebSocketProxy(targetHost, request, currentHost) {
+	try {
+		const targetWsUrl = new URL(request.url);
+		targetWsUrl.hostname = targetHost;
+
+		const headers = new Headers();
+		for (const [key, value] of request.headers.entries()) {
+			headers.set(key, value);
+		}
+		headers.set('X-Forwarded-Host', currentHost);
+
+		const upstreamResponse = await fetch(targetWsUrl.toString(), {
+			headers: headers
+		});
+
+		const upstreamWs = upstreamResponse.webSocket;
+		if (!upstreamWs) {
+			return new Response('Upstream WebSocket failed', { status: 502 });
+		}
+		upstreamWs.accept();
+
+		const clientPair = new WebSocketPair();
+		const [clientWs, serverWs] = Object.values(clientPair);
+		serverWs.accept();
+
+		serverWs.addEventListener('message', (event) => {
+			try { upstreamWs.send(event.data); } catch (e) { }
+		});
+
+		upstreamWs.addEventListener('message', (event) => {
+			try { serverWs.send(event.data); } catch (e) { }
+		});
+
+		serverWs.addEventListener('close', (event) => {
+			try { upstreamWs.close(event.code, event.reason); } catch (e) { }
+		});
+
+		upstreamWs.addEventListener('close', (event) => {
+			try { serverWs.close(event.code, event.reason); } catch (e) { }
+		});
+
+		return new Response(null, { status: 101, webSocket: clientWs });
+
+	} catch (err) {
+		console.error('WebSocket proxy error:', err);
+		return new Response('WebSocket proxy failed: ' + err.message, { status: 502 });
+	}
+}
