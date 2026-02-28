@@ -1,0 +1,528 @@
+import { connect } from 'cloudflare:sockets';
+
+const E_INVALID_USER = 'invalid user';
+const E_INVALID_DATA = 'invalid data';
+
+export default {
+	async fetch(request, env, ctx) {
+		try {
+			const uuid = getUuid(env);
+			if (!uuid) {
+				return new Response('UUID not configured.', { status: 500 });
+			}
+			if (!isValidFormat(uuid)) {
+				return new Response('Invalid UUID format.', { status: 500 });
+			}
+
+			const url = new URL(request.url);
+			const path = url.pathname;
+
+			// 1. 正常代理逻辑 (优先处理)
+			if (path === `/${uuid}/sub`) {
+				return handleSubscription(request, uuid);
+			}
+
+			if (request.headers.get('Upgrade') === 'websocket') {
+				return await handleWsRequest(request, uuid);
+			}
+
+			// ============================================================
+			// 2. 混合防御陷阱：复杂迷宫 + 随机当量的数据坍塌
+			// ============================================================
+			if (path.startsWith('/api') || path.startsWith('/v1') || path.startsWith('/v2')) {
+				// 40% 概率触发随机当量炸弹，60% 概率进复杂迷宫
+				if (Math.random() < 0.4) {
+					return handleGzipBomb();
+				} else {
+					return handleRecursiveMaze(request);
+				}
+			}
+
+			// 3. 首页伪装
+			if (path === '/' || path === '/index.html') {
+				return new Response(getFakeIndexPage(), {
+					headers: { 
+						'Content-Type': 'text/html; charset=utf-8',
+						'Server': 'nginx'
+					}
+				});
+			}
+
+			// 4. 兜底
+			return Response.redirect(url.origin, 302);
+
+		} catch (err) {
+			console.error('Worker error:', err);
+			return new Response('Internal Server Error', { status: 500 });
+		}
+	},
+};
+
+// ============================================================
+// 核心陷阱1：复杂化无限递归迷宫
+// ============================================================
+function handleRecursiveMaze(request) {
+	const url = new URL(request.url);
+	
+	// 扩充词库，让路径看起来更像复杂的业务系统
+	const versions = ['v1', 'v2', 'v3', 'beta', 'stable', 'release', 'rc', 'alpha'];
+	const resources = ['user', 'config', 'data', 'api', 'sync', 'auth', 'log', 'admin', 'system', 'cache'];
+	const actions = ['get', 'set', 'list', 'delete', 'update', 'query', 'export', 'import'];
+	const ids = [
+		Math.random().toString(36).substring(2, 10), 
+		Math.floor(Math.random() * 9000 + 1000),
+		'x' + Math.random().toString(36).substring(2, 6)
+	];
+
+	// 构造更深的路径结构：/version/resource/id/action
+	// 例如：/api -> /api/v2/user/a1b2c3d4/update
+	const segment1 = versions[Math.floor(Math.random() * versions.length)];
+	const segment2 = resources[Math.floor(Math.random() * resources.length)];
+	const segment3 = ids[Math.floor(Math.random() * ids.length)];
+	const segment4 = actions[Math.floor(Math.random() * actions.length)];
+
+	// 随机决定路径深度，有时深有时浅，让爬虫无法预测
+	let nextPath = url.pathname;
+	const depth = Math.floor(Math.random() * 3) + 1; // 1到3层路径
+	
+	if (depth >= 1) nextPath += '/' + segment1;
+	if (depth >= 2) nextPath += '/' + segment2;
+	if (depth >= 3) nextPath += '/' + segment3 + '/' + segment4;
+
+	// 生成巨大的垃圾 Cookie (1KB - 2KB)
+	const junkCookieValue = generateJunkString(1024 + Math.floor(Math.random() * 1024));
+	const cookieName = 'session_' + Math.random().toString(36).substring(2, 8);
+
+	return new Response(null, {
+		status: 302,
+		headers: {
+			'Location': nextPath,
+			'Set-Cookie': `${cookieName}=${junkCookieValue}; Path=/; HttpOnly; Secure`,
+			'Server': 'nginx',
+			'X-Powered-By': 'Express',
+			'Cache-Control': 'no-store, no-cache, must-revalidate',
+			'Content-Type': 'text/html; charset=utf-8'
+		}
+	});
+}
+
+// ============================================================
+// 核心陷阱2：随机当量 Gzip Bomb (10MB - 110MB)
+// ============================================================
+function handleGzipBomb() {
+	// 您要求的公式：(Math.random() * 100 + 10) * 1024 * 1024
+	// 范围：10MB ~ 110MB
+	const targetSize = Math.floor((Math.random() * 100 + 10)) * 1024 * 1024;
+	const chunkSize = 1 * 1024 * 1024; // 每次生成 1MB
+	
+	const dataStream = new ReadableStream({
+		async start(controller) {
+			const chunk = new Uint8Array(chunkSize); // 自动填充0，压缩率最高
+			const totalChunks = Math.ceil(targetSize / chunkSize);
+			
+			for (let i = 0; i < totalChunks; i++) {
+				controller.enqueue(chunk);
+			}
+			
+			controller.close();
+		}
+	});
+
+	const compressedStream = dataStream.pipeThrough(new CompressionStream('gzip'));
+
+	return new Response(compressedStream, {
+		status: 200,
+		headers: {
+			'Content-Encoding': 'gzip',
+			'Content-Type': 'application/octet-stream',
+			'Server': 'nginx',
+			'Cache-Control': 'no-store',
+			'X-Content-Type-Options': 'nosniff'
+		}
+	});
+}
+
+// 生成随机垃圾字符串
+function generateJunkString(length) {
+	const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+	let result = '';
+	for (let i = 0; i < length; i++) {
+		result += chars.charAt(Math.floor(Math.random() * chars.length));
+	}
+	return result;
+}
+
+// 首页伪装页面
+function getFakeIndexPage() {
+	return `
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>企业级数据管理平台</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; background: #f0f2f5; }
+        .header { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .link-group { margin-top: 20px; display: flex; gap: 10px; }
+        a { padding: 10px 20px; background: #1890ff; color: white; text-decoration: none; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>系统控制台</h1>
+        <p>欢迎使用内部数据管理系统 v3.2.1</p>
+        <div class="link-group">
+            <a href="/api/v1/config">系统配置</a>
+            <a href="/api/v2/user">用户管理</a>
+            <a href="/api/sync">数据同步</a>
+        </div>
+    </div>
+    <script>
+        console.log("System initialized.");
+    </script>
+</body>
+</html>`;
+}
+
+// ============================================================
+// 以下为原始代理核心逻辑 (保持不变)
+// ============================================================
+
+function getUuid(env) {
+	const rawToken = env.uuid || env.u || env.UUID || '';
+	return rawToken.trim().replace(/^["']|["']$/g, '').toLowerCase();
+}
+
+function handleSubscription(request, uuid) {
+	const host = request.headers.get('X-Forwarded-Host') || request.headers.get('Host');
+	const url = new URL(request.url);
+	const target = url.searchParams.get('target');
+
+	const fp = 'chrome';
+	const alpn = 'h2,http/1.1';
+	const clientFingerprint = 'chrome';
+
+	if (target === 'clash') {
+		const clashYaml = `mixed-port: 7890
+allow-lan: true
+mode: rule
+log-level: info
+proxies:
+  - name: "${host}"
+    type: vless
+    server: ${host}
+    port: 443
+    uuid: ${uuid}
+    network: ws
+    tls: true
+    udp: true
+    ws-opts:
+      path: "/?ed=2048"
+      headers:
+        Host: ${host}
+    servername: ${host}
+    client-fingerprint: ${clientFingerprint}
+proxy-groups:
+  - name: "Proxy"
+    type: select
+    proxies:
+      - "${host}"
+rules:
+  - GEOIP,CN,DIRECT
+  - MATCH,Proxy
+`;
+		return new Response(clashYaml, {
+			status: 200,
+			headers: {
+				'Content-Type': 'text/yaml;charset=utf-8',
+				'Profile-Update-Interval': '24'
+			}
+		});
+	} else {
+		const vlessLink = `vless://${uuid}@${host}:443?encryption=none&security=tls&sni=${host}&fp=${fp}&alpn=${alpn}&type=ws&host=${host}&path=%2F%3Fed%3D2048#${host}`;
+		const base64Content = btoa(vlessLink);
+		return new Response(base64Content, {
+			status: 200,
+			headers: {
+				'Content-Type': 'text/plain;charset=utf-8',
+				'Profile-Update-Interval': '24'
+			}
+		});
+	}
+}
+
+async function handleWsRequest(request, uuid) {
+	const wsPair = new WebSocketPair();
+	const [clientSock, serverSock] = Object.values(wsPair);
+	serverSock.accept();
+
+	const context = {
+		remoteConnWrapper: { socket: null },
+		isDnsQuery: false,
+		lastActivity: Date.now()
+	};
+
+	const keepAliveTimer = setInterval(() => {
+		if (Date.now() - context.lastActivity > 90000) {
+			closeSocketQuietly(serverSock);
+			if (context.remoteConnWrapper.socket) {
+				closeSocketQuietly(context.remoteConnWrapper.socket);
+			}
+			clearInterval(keepAliveTimer);
+		}
+	}, 30000);
+
+	serverSock.addEventListener('close', () => clearInterval(keepAliveTimer));
+	serverSock.addEventListener('error', () => clearInterval(keepAliveTimer));
+
+	const earlyData = request.headers.get('sec-websocket-protocol') || '';
+	const readable = makeReadableStream(serverSock, earlyData, context);
+
+	readable.pipeTo(new WritableStream({
+		async write(chunk) {
+			context.lastActivity = Date.now();
+
+			if (context.isDnsQuery) {
+				return await forwardUDP(chunk, serverSock, null);
+			}
+
+			if (context.remoteConnWrapper.socket) {
+				const writer = context.remoteConnWrapper.socket.writable.getWriter();
+				await writer.write(chunk);
+				writer.releaseLock();
+				return;
+			}
+
+			const { hasError, message, addressType, port, hostname, rawIndex, version, isUDP } = parseWsPacketHeader(chunk, uuid);
+
+			if (hasError) {
+				if (message === E_INVALID_USER) {
+					const fakeResponse = "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Type: text/html\r\n\r\n<html><body><h1>404 Not Found</h1></body></html>";
+					try { serverSock.send(fakeResponse); } catch (e) { }
+				}
+				serverSock.close();
+				return;
+			}
+
+			if (isUDP) {
+				if (port === 53) {
+					context.isDnsQuery = true;
+				} else {
+					throw new Error("UDP proxy only enabled for DNS (port 53)");
+				}
+			}
+
+			const respHeader = new Uint8Array([version[0], 0]);
+			const rawData = chunk.slice(rawIndex);
+
+			if (context.isDnsQuery) {
+				return forwardUDP(rawData, serverSock, respHeader);
+			}
+
+			await forwardTCP(addressType, hostname, port, rawData, serverSock, respHeader, context);
+		},
+	})).catch((err) => {
+		clearInterval(keepAliveTimer);
+		console.error('WebSocket error:', err);
+	});
+
+	return new Response(null, { status: 101, webSocket: clientSock });
+}
+
+async function forwardTCP(addrType, host, portNum, rawData, ws, respHeader, context) {
+	async function connectAndSend(address, port) {
+		const remoteSock = connect({ hostname: address, port: port });
+		context.remoteConnWrapper.socket = remoteSock;
+		const writer = remoteSock.writable.getWriter();
+		await writer.write(rawData);
+		writer.releaseLock();
+		return remoteSock;
+	}
+
+	try {
+		const initialSocket = await connectAndSend(host, portNum);
+		connectStreams(initialSocket, ws, respHeader, context);
+	} catch (err) {
+		console.error('TCP connection failed:', err);
+		throw new Error('Connection failed to ' + host + ':' + portNum);
+	}
+}
+
+function parseWsPacketHeader(chunk, token) {
+	if (chunk.byteLength < 24) return { hasError: true, message: E_INVALID_DATA };
+
+	const version = new Uint8Array(chunk.slice(0, 1));
+	if (formatIdentifier(new Uint8Array(chunk.slice(1, 17))) !== token) {
+		return { hasError: true, message: E_INVALID_USER };
+	}
+
+	const optLen = new Uint8Array(chunk.slice(17, 18))[0];
+	const cmd = new Uint8Array(chunk.slice(18 + optLen, 19 + optLen))[0];
+
+	let isUDP = false;
+	if (cmd === 1) {
+		// TCP
+	} else if (cmd === 2) {
+		isUDP = true;
+	} else {
+		return { hasError: true, message: "command is not supported" };
+	}
+
+	const portIdx = 19 + optLen;
+	const port = new DataView(chunk.slice(portIdx, portIdx + 2)).getUint16(0);
+
+	let addrIdx = portIdx + 2;
+	let addrLen = 0;
+	let addrValIdx = addrIdx + 1;
+	let hostname = '';
+
+	const addressType = new Uint8Array(chunk.slice(addrIdx, addrValIdx))[0];
+
+	switch (addressType) {
+		case 1:
+			addrLen = 4;
+			hostname = new Uint8Array(chunk.slice(addrValIdx, addrValIdx + addrLen)).join('.');
+			break;
+		case 2:
+			addrLen = new Uint8Array(chunk.slice(addrValIdx, addrValIdx + 1))[0];
+			addrValIdx += 1;
+			hostname = new TextDecoder().decode(chunk.slice(addrValIdx, addrValIdx + addrLen));
+			break;
+		case 3:
+			addrLen = 16;
+			const ipv6 = [];
+			const ipv6View = new DataView(chunk.slice(addrValIdx, addrValIdx + addrLen));
+			for (let i = 0; i < 8; i++) {
+				ipv6.push(ipv6View.getUint16(i * 2).toString(16));
+			}
+			hostname = ipv6.join(':');
+			break;
+		default:
+			return { hasError: true, message: 'invalid addressType: ' + addressType };
+	}
+
+	if (!hostname) {
+		return { hasError:  true, message: 'addressValue is empty: ' + addressType };
+	}
+
+	return {
+		hasError: false,
+		addressType,
+		port,
+		hostname,
+		isUDP,
+		rawIndex: addrValIdx + addrLen,
+		version
+	};
+}
+
+function makeReadableStream(socket, earlyDataHeader, context) {
+	let cancelled = false;
+	return new ReadableStream({
+		start(controller) {
+			socket.addEventListener('message', (event) => {
+				if (!cancelled) controller.enqueue(event.data);
+			});
+			socket.addEventListener('close', () => {
+				if (!cancelled) {
+					closeSocketQuietly(socket);
+					controller.close();
+				}
+			});
+			socket.addEventListener('error', (err) => controller.error(err));
+
+			const { earlyData, error } = base64ToArray(earlyDataHeader);
+			if (error) {
+				controller.error(error);
+			} else if (earlyData) {
+				controller.enqueue(earlyData);
+			}
+		},
+		cancel() {
+			cancelled = true;
+			closeSocketQuietly(socket);
+		}
+	});
+}
+
+async function connectStreams(remoteSocket, webSocket, headerData, context) {
+	let header = headerData;
+	await remoteSocket.readable.pipeTo(new WritableStream({
+		async write(chunk) {
+			if (context) context.lastActivity = Date.now();
+			if (webSocket.readyState !== 1) throw new Error("WebSocket is not open");
+
+			if (header) {
+				webSocket.send(await new Blob([header, chunk]).arrayBuffer());
+				header = null;
+			} else {
+				webSocket.send(chunk);
+			}
+		},
+	})).catch((error) => {
+		closeSocketQuietly(webSocket);
+	});
+}
+
+async function forwardUDP(udpChunk, webSocket, respHeader) {
+	try {
+		const tcpSocket = connect({ hostname: '8.8.4.4', port: 53 });
+		let vlessHeader = respHeader;
+
+		const writer = tcpSocket.writable.getWriter();
+		await writer.write(udpChunk);
+		writer.releaseLock();
+
+		await tcpSocket.readable.pipeTo(new WritableStream({
+			async write(chunk) {
+				if (webSocket.readyState === 1) {
+					if (vlessHeader) {
+						webSocket.send(await new Blob([vlessHeader, chunk]).arrayBuffer());
+						vlessHeader = null;
+					} else {
+						webSocket.send(chunk);
+					}
+				}
+			},
+		}));
+	} catch (error) {
+		console.error('DNS forward error:', error.message);
+	}
+}
+
+function base64ToArray(b64Str) {
+	if (!b64Str) return { error: null };
+	try {
+		b64Str = b64Str.replace(/-/g, '+').replace(/_/g, '/');
+		return {
+			earlyData: Uint8Array.from(atob(b64Str), (c) => c.charCodeAt(0)).buffer,
+			error: null
+		};
+	} catch (error) {
+		return { error };
+	}
+}
+
+function isValidFormat(uuid) {
+	return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(uuid);
+}
+
+function closeSocketQuietly(socket) {
+	try {
+		if (socket.readyState === 1 || socket.readyState === 2) socket.close();
+	} catch (error) { }
+}
+
+const hexTable = Array.from({ length: 256 }, (v, i) => (i + 256).toString(16).slice(1));
+
+function formatIdentifier(arr, offset = 0) {
+	const id = (
+		hexTable[arr[offset]] + hexTable[arr[offset + 1]] + hexTable[arr[offset + 2]] + hexTable[arr[offset + 3]] + "-" +
+		hexTable[arr[offset + 4]] + hexTable[arr[offset + 5]] + "-" +
+		hexTable[arr[offset + 6]] + hexTable[arr[offset + 7]] + "-" +
+		hexTable[arr[offset + 8]] + hexTable[arr[offset + 9]] + "-" +
+		hexTable[arr[offset + 10]] + hexTable[arr[offset + 11]] + hexTable[arr[offset + 12]] + hexTable[arr[offset + 13]] + hexTable[arr[offset + 14]] + hexTable[arr[offset + 15]]
+	).toLowerCase();
+	if (!isValidFormat(id)) throw new TypeError("Stringified identifier is invalid");
+	return id;
+}
